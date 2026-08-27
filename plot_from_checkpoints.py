@@ -27,6 +27,7 @@ and how much headroom each figure has above the 7pt floor.
 import os, argparse
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
 
 CONDITIONS = ["SRB", "ES", "DPF", "DERL", "AC"]
 ABL_PRS    = [0.0, 0.5, 1.5, 3.0]
@@ -110,6 +111,39 @@ def _legend(ax, ncol=2):
               handletextpad=0.5, borderaxespad=0.3)
 
 
+def _episode_axis(ax, n_ep):
+    """
+    Label the x-axis in units of 10^k so ticks stay short (0..5 instead of
+    0..50000). The factor goes in the axis label rather than a corner offset,
+    which would collide with the label at print size.
+    """
+    exp = int(np.floor(np.log10(max(n_ep, 1)))) if n_ep > 0 else 0
+    if exp < 3:
+        ax.set_xlabel("Episode")
+        return
+    div = 10.0 ** exp
+    ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: f"{v/div:g}"))
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=6, steps=[1, 2, 2.5, 5, 10]))
+    ax.set_xlabel(rf"Episode ($\times 10^{{{exp}}}$)")
+
+
+def _fit_y(ax):
+    """
+    Fit the y-range to what is actually drawn instead of a fixed limit.
+    Hardcoded limits left `truth` and `mine` using only a third of their panel,
+    which squeezed the curves together; fitting spreads them out.
+    """
+    ax.margins(y=0.09)
+    ax.autoscale_view()
+    # fitting the range can leave only two ticks; keep enough to read values off
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=5, steps=[1, 2, 2.5, 5, 10]))
+    lo, hi = ax.get_ylim()
+    if lo < 0:
+        # these metrics are all non-negative: keep a sliver below zero so a
+        # flat-at-zero series is still visible, but no misleading negative span
+        ax.set_ylim(-0.025 * (hi - lo), hi)
+
+
 def sm(x_2d, w=100):
     if x_2d.ndim == 1:
         x_2d = x_2d.reshape(1, -1)
@@ -138,7 +172,7 @@ def _save(fig, fname):
     plt.close(fig)
 
 
-def _curve(R, key, ylabel, fname, panel_w, conds=None, ylim=None):
+def _curve(R, key, ylabel, fname, panel_w, n_ep, conds=None):
     """Single-panel figure. No title — the LaTeX caption carries that."""
     source_w = 6.5
     sty(source_w, panel_w)
@@ -148,9 +182,9 @@ def _curve(R, key, ylabel, fname, panel_w, conds=None, ylim=None):
         if c in R:
             plot_with_fill(ax, R[c][key], label=LB.get(c, c),
                            color=CL.get(c, "#000"), **st(c))
-    ax.set(xlabel="Episode", ylabel=ylabel)
-    if ylim:
-        ax.set_ylim(ylim)
+    ax.set_ylabel(ylabel)
+    _episode_axis(ax, n_ep)
+    _fit_y(ax)
     _legend(ax, ncol=2)
     fig.tight_layout()
     _save(fig, fname)
@@ -208,12 +242,13 @@ def make_plots(R, od, print_w=7.0, panel_w=3.4):
 
 def _draw_all(R, print_w, panel_w):
     n_saved = 0
+    n_ep = R[next(c for c in CONDITIONS if c in R)]["truth"].shape[1]
 
     # ── Figs 1-4, 7, 8: single panels, printed inside 2x2 composites ──────
-    _curve(R, "truth",  "Truth Rate",  "fig01_epistemic",     panel_w, ylim=(-0.02, 0.65))
-    _curve(R, "gather", "Gather Rate", "fig02_ethical",       panel_w, ylim=(-0.02, 1.0))
-    _curve(R, "lie",    "Lie Rate",    "fig03_hallucination", panel_w, ylim=(-0.02, 1.0))
-    _curve(R, "mine",   "Mine Rate",   "fig04_moral_drift",   panel_w, ylim=(-0.02, 0.5))
+    _curve(R, "truth",  "Truth Rate",  "fig01_epistemic",     panel_w, n_ep)
+    _curve(R, "gather", "Gather Rate", "fig02_ethical",       panel_w, n_ep)
+    _curve(R, "lie",    "Lie Rate",    "fig03_hallucination", panel_w, n_ep)
+    _curve(R, "mine",   "Mine Rate",   "fig04_moral_drift",   panel_w, n_ep)
     n_saved += 4
 
     # ── Fig 5: emergent social dynamics, full-width 3-panel strip ─────────
@@ -226,10 +261,11 @@ def _draw_all(R, print_w, panel_w):
         plot_with_fill(axes[0], R[c]["punish"],   label=LB[c], color=CL[c], **st(c))
         plot_with_fill(axes[1], R[c]["verify"],   label=LB[c], color=CL[c], **st(c))
         plot_with_fill(axes[2], R[c]["mean_rep"], label=LB[c], color=CL[c], **st(c))
-    axes[0].set(xlabel="Episode", ylabel="Punishment Rate")
-    axes[1].set(xlabel="Episode", ylabel="Verification Rate")
-    axes[2].set(xlabel="Episode", ylabel="Mean Reputation")
-    for a in axes:
+    for a, yl in zip(axes, ["Punishment Rate", "Verification Rate",
+                            "Mean Reputation"]):
+        a.set_ylabel(yl)
+        _episode_axis(a, n_ep)
+        _fit_y(a)
         _legend(a, ncol=2)
     fig.tight_layout()
     _save(fig, "fig05_social")
@@ -244,9 +280,11 @@ def _draw_all(R, print_w, panel_w):
             continue
         plot_with_fill(a1, R[c]["coop"],       label=LB[c], color=CL[c], **st(c))
         plot_with_fill(a2, R[c]["oracle_acc"], label=LB[c], color=CL[c], **st(c))
-    a1.set(xlabel="Episode", ylabel="Cooperation Rate", ylim=(-0.02, 0.5))
-    a2.set(xlabel="Episode", ylabel="Oracle Accuracy",  ylim=(-0.02, 1.05))
-    _legend(a1, ncol=2); _legend(a2, ncol=2)
+    for a, yl in zip((a1, a2), ["Cooperation Rate", "Oracle Accuracy"]):
+        a.set_ylabel(yl)
+        _episode_axis(a, n_ep)
+        _fit_y(a)
+        _legend(a, ncol=2)
     fig.tight_layout()
     _save(fig, "fig06_coop_oracle")
     n_saved += 1
@@ -260,7 +298,9 @@ def _draw_all(R, print_w, panel_w):
             continue
         ax.plot(np.cumsum(np.mean(R[c]["reward"], axis=0)),
                 label=LB[c], color=CL[c], **st(c))
-    ax.set(xlabel="Episode", ylabel="Cumulative Reward")
+    ax.set_ylabel("Cumulative Reward")
+    _episode_axis(ax, n_ep)
+    _fit_y(ax)
     # y only: an x-axis offset label would collide with "Episode" at print size,
     # and plain episode counts match the other panels.
     ax.ticklabel_format(axis='y', style='sci', scilimits=(0, 0), useMathText=True)
@@ -270,8 +310,7 @@ def _draw_all(R, print_w, panel_w):
     n_saved += 1
 
     # ── Fig 8: resource sustainability ────────────────────────────────────
-    mx = max(np.mean(R[c]["res"], axis=0).max() for c in MC if c in R)
-    _curve(R, "res", "Active Resources", "fig08_resources", panel_w, ylim=(0, mx * 1.2))
+    _curve(R, "res", "Active Resources", "fig08_resources", panel_w, n_ep)
     n_saved += 1
 
     # ── Fig 9: punishment-profitability ablation ──────────────────────────
@@ -329,11 +368,13 @@ def _draw_all(R, print_w, panel_w):
         axes[0].set(ylabel="Rate"); _legend(axes[0], ncol=2)
         plot_with_fill(axes[1], ed["coop"], "DPF", CL["DPF"], **st("DPF"))
         plot_with_fill(axes[1], cd["coop"], "AC",  CL["AC"],  **st("AC"))
-        axes[1].set(xlabel="Episode", ylabel="Cooperation Rate", ylim=(-0.02, 0.5))
+        axes[1].set_ylabel("Cooperation Rate")
+        _episode_axis(axes[1], n_ep); _fit_y(axes[1])
         _legend(axes[1], ncol=2)
         plot_with_fill(axes[2], ed["oracle_acc"], "DPF", CL["DPF"], **st("DPF"))
         plot_with_fill(axes[2], cd["oracle_acc"], "AC",  CL["AC"],  **st("AC"))
-        axes[2].set(xlabel="Episode", ylabel="Oracle Accuracy", ylim=(-0.02, 1.05))
+        axes[2].set_ylabel("Oracle Accuracy")
+        _episode_axis(axes[2], n_ep); _fit_y(axes[2])
         _legend(axes[2], ncol=2)
         fig.tight_layout()
         _save(fig, "fig10_collusion")
