@@ -39,9 +39,15 @@ ADDRESSING ALL 7 REVIEWER CRITIQUES:
      a liar (+2.0). Agents learn cost-benefit of verification.
 """
 
+import os
+# Set before numpy imports: each worker process runs tiny arrays, so BLAS
+# threading only causes oversubscription when 32 workers run concurrently.
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+
 import numpy as np
-import matplotlib.pyplot as plt
-import os, time, warnings
+import argparse, time, warnings
+from multiprocessing import Pool
 warnings.filterwarnings("ignore")
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -369,361 +375,139 @@ def train(env_kw, n_ep=500, alpha=0.10, gamma=0.7,
 # ═══════════════════════════════════════════════════════════════════════════
 # EXPERIMENT SUITE (Multi-Seed Integration)
 # ═══════════════════════════════════════════════════════════════════════════
-def run_all(N=500, seeds=[42, 43, 44, 45, 46]):
-    configs = [
-        ("baseline", dict(
-            use_hardcoded=False, use_emergent=False, use_intrinsic=False,
-            coop_bonus=0.0)),
+# Condition names match the PPO checkpoint vocabulary in pettingzoo_test.py so
+# that plot_from_checkpoints.py can load either family with only --checkpoint-dir.
+#   SRB=baseline  ES=hardcoded  DPF=emergent  DERL=full  AC=collusion
+CONDITIONS = [
+    ("SRB", dict(
+        use_hardcoded=False, use_emergent=False, use_intrinsic=False,
+        coop_bonus=0.0)),
 
-        ("hardcoded", dict(
-            use_hardcoded=True, use_emergent=False, use_intrinsic=False,
-            coop_bonus=0.0)),
+    ("ES", dict(
+        use_hardcoded=True, use_emergent=False, use_intrinsic=False,
+        coop_bonus=0.0)),
 
-        ("emergent", dict(
-            use_hardcoded=False, use_emergent=True, use_intrinsic=False,
-            coop_bonus=1.5)),
+    ("DPF", dict(
+        use_hardcoded=False, use_emergent=True, use_intrinsic=False,
+        coop_bonus=1.5)),
 
-        ("full", dict(
-            use_hardcoded=False, use_emergent=True, use_intrinsic=True,
-            coop_bonus=1.5)),
+    ("DERL", dict(
+        use_hardcoded=False, use_emergent=True, use_intrinsic=True,
+        coop_bonus=1.5)),
 
-        ("collusion", dict(
-            use_hardcoded=False, use_emergent=True, use_intrinsic=False,
-            coop_bonus=1.5,
-            cartel=[0, 1], cartel_share=0.3)),
-    ]
+    ("AC", dict(
+        use_hardcoded=False, use_emergent=True, use_intrinsic=False,
+        coop_bonus=1.5,
+        cartel=[0, 1], cartel_share=0.3)),
+]
 
-    R = {}
-    for nm, kw in configs:
-        print(f"\n{'='*65}")
-        print(f"  {nm.upper()}")
-        if nm == "collusion":
-            print(f"  Cartel agents: {kw.get('cartel', [])}, "
-                  f"share: {kw.get('cartel_share', 0)}")
-        print(f"{'='*65}")
-        
-        seed_results = []
+ABL_PRS = [0.0, 0.5, 1.5, 3.0]
+
+
+def _run_job(job):
+    """One (name, seed) training run. Module-level so Pool can pickle it."""
+    nm, kw, seed, n_ep, ckpt = job
+    if os.path.exists(ckpt):
+        return nm, seed, True
+    res = train(kw, n_ep=n_ep, seed=seed, verbose=False)
+    np.savez(ckpt, **res)
+    return nm, seed, False
+
+
+def build_jobs(N, seeds, ckpt_dir):
+    """The 45 independent runs: 5 conditions + 4 punish_reward ablations, × seeds."""
+    jobs = []
+    for nm, kw in CONDITIONS:
         for s in seeds:
-            print(f"  Running seed {s}...")
-            seed_results.append(train(kw, n_ep=N, seed=s, verbose=False))
-            
-        agg_R = {}
-        for k in seed_results[0].keys():
-            agg_R[k] = np.vstack([res[k] for res in seed_results])
-        R[nm] = agg_R
-
-    # ── Ablation 1: punishment profitability ──────────────────────────────
-    print(f"\n{'='*65}")
-    print(f"  ABLATION: punishment_reward")
-    print(f"{'='*65}")
-    abl_pr = {}
-    for pr in [0.0, 0.5, 1.5, 3.0]:
-        print(f"  pun_rew={pr}...", end=" ", flush=True)
-        seed_results = []
+            jobs.append((nm, kw, s, N,
+                         os.path.join(ckpt_dir, f"{nm}_seed{s}.npz")))
+    for pr in ABL_PRS:
+        kw = dict(use_hardcoded=False, use_emergent=True, use_intrinsic=False,
+                  coop_bonus=1.5, punish_reward=pr)
         for s in seeds:
-            res = train(
-                dict(use_hardcoded=False, use_emergent=True, use_intrinsic=False,
-                     coop_bonus=1.5, punish_reward=pr),
-                n_ep=N, seed=s, verbose=False)
-            seed_results.append(res)
-            
-        agg_abl = {}
-        for k in seed_results[0].keys():
-            agg_abl[k] = np.vstack([res[k] for res in seed_results])
-        abl_pr[pr] = agg_abl
-        
-        s_slice = slice(-100, None)
-        print(f"T={np.mean(abl_pr[pr]['truth'][:, s_slice]):.3f}  "
-              f"L={np.mean(abl_pr[pr]['lie'][:, s_slice]):.3f}  "
-              f"G={np.mean(abl_pr[pr]['gather'][:, s_slice]):.3f}  "
-              f"M={np.mean(abl_pr[pr]['mine'][:, s_slice]):.3f}  "
-              f"P={np.mean(abl_pr[pr]['punish'][:, s_slice]):.3f}")
+            jobs.append((f"abl_pr{pr}", kw, s, N,
+                         os.path.join(ckpt_dir, f"abl_pr{pr}_seed{s}.npz")))
+    return jobs
 
-    # ── Ablation 2: cooperation bonus ─────────────────────────────────────
-    print(f"\n{'='*65}")
-    print(f"  ABLATION: coop_bonus")
-    print(f"{'='*65}")
-    abl_cb = {}
-    for cb in [0.0, 1.0, 2.0, 4.0]:
-        print(f"  coop={cb}...", end=" ", flush=True)
-        seed_results = []
-        for s in seeds:
-            res = train(
-                dict(use_hardcoded=False, use_emergent=True, use_intrinsic=False,
-                     coop_bonus=cb),
-                n_ep=N, seed=s, verbose=False)
-            seed_results.append(res)
-            
-        agg_abl = {}
-        for k in seed_results[0].keys():
-            agg_abl[k] = np.vstack([res[k] for res in seed_results])
-        abl_cb[cb] = agg_abl
-        
-        s_slice = slice(-100, None)
-        print(f"T={np.mean(abl_cb[cb]['truth'][:, s_slice]):.3f}  "
-              f"L={np.mean(abl_cb[cb]['lie'][:, s_slice]):.3f}  "
-              f"G={np.mean(abl_cb[cb]['gather'][:, s_slice]):.3f}  "
-              f"co={np.mean(abl_cb[cb]['coop'][:, s_slice]):.3f}")
 
-    R["abl_pr"] = abl_pr
-    R["abl_cb"] = abl_cb
-    return R
+def run_all(N=500, seeds=[42, 43, 44, 45, 46],
+            ckpt_dir="checkpoints_qlearning", workers=None):
+    """
+    Train every condition and save one .npz per (condition, seed).
+
+    Runs are independent and deterministic given their seed, so they are
+    distributed over a process pool and skipped when a checkpoint already
+    exists — making the whole sweep resumable.
+    """
+    os.makedirs(ckpt_dir, exist_ok=True)
+    jobs = build_jobs(N, seeds, ckpt_dir)
+
+    todo = [j for j in jobs if not os.path.exists(j[-1])]
+    workers = workers or min(len(todo) or 1, os.cpu_count() or 1)
+
+    print(f"{len(jobs)} runs total, {len(jobs) - len(todo)} already checkpointed, "
+          f"{len(todo)} to run on {workers} workers")
+
+    if todo:
+        t0 = time.time()
+        with Pool(workers) as pool:
+            for i, (nm, seed, cached) in enumerate(
+                    pool.imap_unordered(_run_job, todo), 1):
+                el = time.time() - t0
+                print(f"  [{i:>2d}/{len(todo)}] {nm}_seed{seed} done "
+                      f"({el/60:.1f} min elapsed, "
+                      f"~{el/i*(len(todo)-i)/60:.1f} min left)", flush=True)
+
+    print(f"\nCheckpoints written to {ckpt_dir}/")
+    print(f"Now plot with:\n"
+          f"  python plot_from_checkpoints.py "
+          f"--checkpoint-dir {ckpt_dir} --outdir plots/v3")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# PLOTS (10 figures)
+# SUMMARY
 # ═══════════════════════════════════════════════════════════════════════════
-MC = ["baseline", "hardcoded", "emergent", "full"]
-CL = {"baseline": "#E66100", "hardcoded": "#999999",
-      "emergent": "#5D3A9B", "full": "#1B7837", "collusion": "#D62728"}
-LB = {"baseline": "Proxy Reward",
-      "hardcoded": "Omniscient Sanctions",
-      "emergent": "Decentralised Peer Feedback",
-      "full": "SoFI",
-      "collusion": "Adversarial Coalition"}
-ST = {"baseline": dict(ls="--", lw=2.2),
-      "hardcoded": dict(ls=":", lw=2),
-      "emergent": dict(ls="-.", lw=2),
-      "full": dict(ls="-", lw=2.8),
-      "collusion": dict(ls="-.", lw=2)}
-
-
-def sm(x_2d, w=100):
-    if x_2d.ndim == 1:
-        x_2d = x_2d.reshape(1, -1)
-        
-    mean_val = np.mean(x_2d, axis=0)
-    std_val = np.std(x_2d, axis=0)
-    
-    w_dynamic = max(w, int(x_2d.shape[1] * 0.02))
-    
-    if len(mean_val) < w_dynamic:
-        return mean_val, std_val * 0.6
-        
-    window = np.hanning(w_dynamic)
-    window /= window.sum()
-    
-    p_mean = np.pad(mean_val, (w_dynamic // 2, w_dynamic - w_dynamic // 2 - 1), mode='edge')
-    smooth_mean = np.convolve(p_mean, window, 'valid')
-    
-    p_std = np.pad(std_val, (w_dynamic // 2, w_dynamic - w_dynamic // 2 - 1), mode='edge')
-    smooth_std = np.convolve(p_std, window, 'valid')
-    
-    return smooth_mean, smooth_std * 0.6
-
-
-def sty():
-    plt.style.use('seaborn-v0_8-whitegrid')
-    plt.rcParams.update({
-        'font.family': 'serif', 'font.size': 11,
-        'axes.titlesize': 13, 'axes.labelsize': 12,
-        'legend.fontsize': 8.5, 'figure.dpi': 150,
-    })
-
-
-def plot_with_fill(ax, data, label, color, **kwargs):
-    mean, std = sm(data)
-    eps = np.arange(len(mean))
-    ax.plot(eps, mean, label=label, color=color, **kwargs)
-    ax.fill_between(eps, mean - std, mean + std, color=color, alpha=0.15, lw=0)
-
-
-def _curve(R, key, title, ylabel, fname, conds=None, ylim=None):
-    sty()
-    fig, ax = plt.subplots(figsize=(6.5, 4))
-    for c in (conds or MC):
-        if c in R:
-            plot_with_fill(ax, R[c][key], label=LB.get(c, c), color=CL.get(c, "#000"), **ST.get(c, dict(lw=1.5)))
-    ax.set(title=title, xlabel="Episode", ylabel=ylabel)
-    if ylim:
-        ax.set_ylim(ylim)
-    ax.legend(framealpha=0.9)
-    fig.tight_layout()
-    for e in ["pdf", "png"]:
-        fig.savefig(f"{fname}.{e}", format=e, bbox_inches="tight", dpi=300)
-    plt.close(fig)
-
-
-def make_plots(R, od="plots/v3"):
-    os.makedirs(od, exist_ok=True)
-    os.chdir(od)
-
-    # ── Fig 1–4: Core behavioral metrics ──────────────────────────────
-    _curve(R, "truth",
-           "Fig 1: Epistemic Integrity", "Truth Rate",
-           "fig01_epistemic", ylim=(-0.02, 0.6))
-
-    _curve(R, "gather",
-           "Fig 2: Ethical Integrity", "Gather Rate",
-           "fig02_ethical", ylim=(-0.02, 1.0))
-
-    _curve(R, "lie",
-           "Fig 3: Hallucination Rate", "Lie Rate",
-           "fig03_hallucination", ylim=(-0.02, 1.0))
-
-    _curve(R, "mine",
-           "Fig 4: Moral Drift", "Mine Rate",
-           "fig04_moral_drift", ylim=(-0.02, 0.5))
-
-    # ── Fig 5: Emergent social dynamics (3-panel) ─────────────────────
-    sty()
-    fig, axes = plt.subplots(1, 3, figsize=(15, 4))
-    for c in ["emergent", "full"]:
-        plot_with_fill(axes[0], R[c]["punish"], label=LB[c], color=CL[c], **ST[c])
-        plot_with_fill(axes[1], R[c]["verify"], label=LB[c], color=CL[c], **ST[c])
-        plot_with_fill(axes[2], R[c]["mean_rep"], label=LB[c], color=CL[c], **ST[c])
-        
-    axes[0].set(title="Punishment Rate", xlabel="Episode", ylabel="Rate")
-    axes[1].set(title="Verification Rate", xlabel="Episode")
-    axes[2].set(title="Mean Reputation Score", xlabel="Episode", ylabel="Score")
-    for a in axes:
-        a.legend(fontsize=7)
-    fig.suptitle("Fig 5: Emergent Social Dynamics", fontsize=13, y=1.01)
-    fig.tight_layout()
-    for e in ["pdf", "png"]:
-        fig.savefig(f"fig05_social.{e}", format=e, bbox_inches="tight", dpi=300)
-    plt.close(fig)
-
-    # ── Fig 6: Cooperation + Oracle Accuracy ──────────────────────────
-    sty()
-    fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 4))
-    for c in MC:
-        plot_with_fill(a1, R[c]["coop"], label=LB[c], color=CL[c], **ST[c])
-        plot_with_fill(a2, R[c]["oracle_acc"], label=LB[c], color=CL[c], **ST[c])
-        
-    a1.set(title="Cooperation Events", xlabel="Episode",
-           ylabel="Rate", ylim=(-0.02, 0.5))
-    a2.set(title="Oracle Accuracy (Ground Truth)", xlabel="Episode",
-           ylabel="Accuracy", ylim=(-0.02, 1.05))
-    a1.legend(fontsize=7)
-    a2.legend(fontsize=7)
-    fig.suptitle("Fig 6: Cooperation & Truth vs Consensus",
-                 fontsize=13, y=1.01)
-    fig.tight_layout()
-    for e in ["pdf", "png"]:
-        fig.savefig(f"fig06_coop_oracle.{e}", format=e,
-                    bbox_inches="tight", dpi=300)
-    plt.close(fig)
-
-    # ── Fig 7: Cumulative Reward ──────────────────────────────────────
-    sty()
-    fig, ax = plt.subplots(figsize=(6.5, 4))
-    for c in MC:
-        mean_rew = np.mean(R[c]["reward"], axis=0)
-        ax.plot(np.cumsum(mean_rew), label=LB[c], color=CL[c], **ST[c])
-        
-    ax.set(title="Fig 7: Cumulative Reward", xlabel="Episode",
-           ylabel="Cum. Reward")
-    ax.ticklabel_format(axis='both', style='sci', scilimits=(0,0), useMathText=True)
-    ax.legend(framealpha=0.9)
-    fig.tight_layout()
-    for e in ["pdf", "png"]:
-        fig.savefig(f"fig07_reward.{e}", format=e,
-                    bbox_inches="tight", dpi=300)
-    plt.close(fig)
-
-    # ── Fig 8: Resource Sustainability ────────────────────────────────
-    mx = max(np.mean(R[c]["res"], axis=0).max() for c in MC)
-    _curve(R, "res",
-           "Fig 8: Resource Sustainability", "Active Resources",
-           "fig08_resources", ylim=(0, mx * 1.2))
-
-    # ── Fig 9: Ablation — Punishment Profitability ────────────────────
-    sty()
-    abl = R["abl_pr"]
-    keys = sorted(abl.keys())
-    mets = ["truth", "gather", "lie", "mine", "punish"]
-    mls = ["Truth ↑", "Gather ↑", "Lie ↓", "Mine ↓", "Punish"]
-    fig, ax = plt.subplots(figsize=(9, 4.5))
-    x = np.arange(len(mets))
-    bw = 0.18
-    cm = plt.cm.viridis
-    for i, k in enumerate(keys):
-        vals = [np.mean(abl[k][m][:, -100:]) for m in mets]
-        ax.bar(x + (i - len(keys)/2 + 0.5) * bw, vals, bw,
-               label=f"pun_rew={k}",
-               color=cm(i / (len(keys) - 1)),
-               edgecolor="white", linewidth=0.5)
-    ax.set_xticks(x)
-    ax.set_xticklabels(mls)
-    ax.set(ylabel="Rate (last 100 ep)",
-           title="Fig 9: Ablation — Punishment Profitability")
-    ax.legend(fontsize=8, ncol=2)
-    fig.tight_layout()
-    for e in ["pdf", "png"]:
-        fig.savefig(f"fig09_ablation_punish.{e}", format=e,
-                    bbox_inches="tight", dpi=300)
-    plt.close(fig)
-
-    # ── Fig 10: Collusion Robustness ──────────────────────────────────
-    sty()
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
-    s = slice(-100, None)
-    cd = R["collusion"]
-    ed = R["emergent"]
-
-    ms = ["truth", "lie", "gather", "mine"]
-    ls = ["Truth", "Lie", "Gather", "Mine"]
-    xp = np.arange(4)
-    ev = [np.mean(ed[m][:, s]) for m in ms]
-    cv = [np.mean(cd[m][:, s]) for m in ms]
-    axes[0].bar(xp - 0.17, ev, 0.32, label="Decentralised Peer Feedback",
-                color="#5D3A9B", edgecolor="white")
-    axes[0].bar(xp + 0.17, cv, 0.32, label="Adversarial Coalition ([0,1])",
-                color="#D62728", edgecolor="white")
-    axes[0].set_xticks(xp)
-    axes[0].set_xticklabels(ls)
-    axes[0].set(title="Behavioral Rates", ylabel="Rate")
-    axes[0].legend(fontsize=8)
-
-    plot_with_fill(axes[1], ed["coop"], "Decentralised Peer Feedback", "#5D3A9B", lw=2.5)
-    plot_with_fill(axes[1], cd["coop"], "Adversarial Coalition", "#D62728", lw=2, ls="--")
-    axes[1].set(title="Cooperation", xlabel="Episode",
-                ylabel="Rate", ylim=(-0.02, 0.5))
-    axes[1].legend(fontsize=8)
-
-    plot_with_fill(axes[2], ed["oracle_acc"], "Decentralised Peer Feedback", "#5D3A9B", lw=2.5)
-    plot_with_fill(axes[2], cd["oracle_acc"], "Adversarial Coalition", "#D62728", lw=2, ls="--")
-    axes[2].set(title="Oracle Accuracy", xlabel="Episode",
-                ylabel="Accuracy", ylim=(-0.02, 1.05))
-    axes[2].legend(fontsize=8)
-
-    fig.suptitle("Fig 10: Adversarial Coalition Robustness (Cartel = Agents 0,1)",
-                 fontsize=13, y=1.02)
-    fig.tight_layout()
-    for e in ["pdf", "png"]:
-        fig.savefig(f"fig10_collusion.{e}", format=e,
-                    bbox_inches="tight", dpi=300)
-    plt.close(fig)
-
-    print(f"\n✓ 10 figures (PDF + PNG) → {od}/")
-    return od
+def print_summary(ckpt_dir, seeds, frac=0.2):
+    """Aggregate the saved checkpoints over the final `frac` of training."""
+    header_keys = ["truth", "lie", "gather", "mine",
+                   "punish", "verify", "coop", "oracle_acc", "mean_rep"]
+    print(f"\n{'='*94}")
+    print(f"  SUMMARY (last {int(frac*100)}% of episodes)")
+    print(f"{'='*94}")
+    print(f"  {'Condition':<10} " +
+          f"{'Truth':>7}{'Lie':>7}{'Gath':>7}{'Mine':>7}"
+          f"{'Pun':>7}{'Ver':>7}{'Coop':>7}{'Orac':>7}{'Rep':>7}{'Res':>7}")
+    print(f"  {'-'*80}")
+    for nm, _ in CONDITIONS:
+        runs = []
+        for s in seeds:
+            p = os.path.join(ckpt_dir, f"{nm}_seed{s}.npz")
+            if os.path.exists(p):
+                runs.append(np.load(p))
+        if not runs:
+            continue
+        n_last = max(1, int(runs[0]["truth"].shape[0] * frac))
+        vals = [np.mean([r[k][-n_last:] for r in runs]) for k in header_keys]
+        res = np.mean([r["res"][-n_last:] for r in runs])
+        print(f"  {nm:<10} " + "".join(f"{v:>7.3f}" for v in vals) + f"{res:>7.1f}")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
 # MAIN
 # ═══════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
-    t0 = time.time()
-    R = run_all(N=50000, seeds=[42, 43, 44, 45, 46])
-    od = make_plots(R)
-    elapsed = time.time() - t0
-    print(f"\nTotal runtime: {elapsed:.0f}s")
+    ap = argparse.ArgumentParser(
+        description="Train the tabular Q-learning conditions and checkpoint them.")
+    ap.add_argument("--episodes", type=int, default=50000)
+    ap.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44, 45, 46])
+    ap.add_argument("--checkpoint-dir", default="checkpoints_qlearning")
+    ap.add_argument("--workers", type=int, default=None,
+                    help="process pool size (default: one per run, capped at CPU count)")
+    args = ap.parse_args()
 
-    # ── Summary table ─────────────────────────────────────────────────
-    print(f"\n{'='*90}")
-    print(f"  SUMMARY (last 100 episodes)")
-    print(f"{'='*90}")
-    header_keys = ["truth", "lie", "gather", "mine",
-                   "punish", "verify", "coop", "oracle_acc", "mean_rep"]
-    print(f"  {'Condition':<16} " +
-          " ".join(f"{'Truth':>6} {'Lie':>6} {'Gath':>6} {'Mine':>6} "
-                   f"{'Pun':>5} {'Ver':>5} {'Coop':>5} {'Orac':>5} {'Rep':>5}"))
-    print(f"  {'-'*82}")
-    for c in MC + ["collusion"]:
-        d = R[c]
-        s = slice(-100, None)
-        vals = [np.mean(d[k][:, s]) for k in header_keys]
-        print(f"  {c:<16} " +
-              " ".join(f"{v:>5.3f}" for v in vals) +
-              f"  {np.mean(d['res'][:, s]):>5.1f} res")
+    t0 = time.time()
+    run_all(N=args.episodes, seeds=args.seeds,
+            ckpt_dir=args.checkpoint_dir, workers=args.workers)
+    print(f"\nTotal runtime: {(time.time()-t0)/60:.1f} min")
+
+    print_summary(args.checkpoint_dir, args.seeds)
