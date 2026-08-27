@@ -24,8 +24,19 @@ the widths the figures will occupy; `--audit` reports the resulting print sizes
 and how much headroom each figure has above the 7pt floor.
 
 Defaults follow the AAAI 2026 style (aaai2026.sty): \textwidth = 7.0in and
-\columnwidth = (7.0 - 0.375)/2 = 3.3125in. Figure sizes are unchanged from the
-originals, so the page budget is unaffected.
+\columnwidth = (7.0 - 0.375)/2 = 3.3125in.
+
+Printed WIDTHS are unchanged from the camera-ready originals — nothing here
+shrinks a figure. Only the printed heights change (PANEL_PRINT_H and friends),
+because height is the axis along which overlapping curves separate, and the
+previous panels gave four curves just 1.4in of it.
+
+The four \textwidth figures (05, 06, 09, 10) go in as `figure*`, spanning both
+columns, and are drawn 1:1 — source width == print width, scale == 1. Nothing
+about them is resampled into the page, so properties matplotlib does not
+express in scaled units (hatch stroke width above all) come out at their
+intended size rather than at 47-78%% of it. Set ONE_TO_ONE_WIDE = False to go
+back to oversized sources.
 """
 
 import os, argparse
@@ -50,12 +61,21 @@ LB = {"SRB":  "SRB",
       "DPF":  "DPF",
       "DERL": "DERL (Ours)",
       "AC":   "AC"}
-# Line style is the second, colour-independent encoding.
-ST = {"SRB":  dict(ls="--", lw=2.2),
-      "ES":   dict(ls=":",  lw=2.4),
-      "DPF":  dict(ls="-.", lw=2.0),
-      "DERL": dict(ls="-",  lw=2.8),
-      "AC":   dict(ls="-.", lw=2.0)}
+# Line style is the second, colour-independent encoding. `lw` and `dashes` are
+# in PRINTED points: st() multiplies them by _K so they survive the downscale.
+#
+# Every dash period is a different length, which is what keeps series apart
+# where they coincide exactly — SRB and ES both sit at 0.0 for most of figs 1-4,
+# and identical periods would stack into one indistinguishable line. Widths are
+# ~1.3pt rather than the old 2.6-2.8pt: at that weight two curves 0.005 apart
+# on a rate axis were touching before their means were.
+ST = {"SRB":  dict(ls="--", lw=1.3, dashes=(4.5, 2.0)),
+      "ES":   dict(ls=":",  lw=1.5, dashes=(1.0, 1.8)),
+      "DPF":  dict(ls="-.", lw=1.3, dashes=(6.0, 1.8, 1.2, 1.8)),
+      "DERL": dict(ls="-",  lw=1.7),
+      "AC":   dict(ls="-.", lw=1.3, dashes=(3.0, 1.6, 1.0, 1.6))}
+# Later = drawn on top. DERL is the contribution, so it is never buried.
+ZO = {"SRB": 2.0, "ES": 2.1, "AC": 2.2, "DPF": 2.3, "DERL": 2.4}
 # Hatching gives bars the redundant encoding that line style gives curves.
 HATCH = ["", "///", "\\\\\\", "xxx"]
 
@@ -67,6 +87,30 @@ COLUMN_WIDTH = (TEXT_WIDTH - COLUMN_SEP) / 2    # 3.3125in
 TARGET_PT = 10.0   # body / axis labels / ticks, once printed
 LEGEND_PT = 9.0    # legend, once printed
 MIN_PT    = 7.0    # reviewer's floor (\scriptsize)
+
+# Printed HEIGHT of the drawing area, in inches. Widths are fixed by the column
+# geometry above and are not touched; height is the only free axis, and it is
+# the axis the curves separate along. The previous version printed a single
+# panel at 3.31 x 1.43in (2.3:1) — four curves inside 1.4in of vertical room,
+# which is what made them read as one band. These give ~1.4:1 instead.
+PANEL_PRINT_H  = 2.35   # figs 1-4, 7, 8: one column-wide panel
+STRIP3_PRINT_H = 3.30   # figs 5, 10: full-width 3-panel strip
+STRIP2_PRINT_H = 3.60   # fig 6: full-width 2-panel
+BARS_PRINT_H   = 3.20   # fig 9: full-width bar chart
+
+FILL_ALPHA = 0.10  # +/-1 sigma band; 0.15 turned overlapping bands into fog
+
+# The four \textwidth figures are drawn 1:1 — source width == printed width, so
+# scale = 1 and nothing is resampled on the way into the page. They used to be
+# drawn 9-15in wide and squeezed into 7in (0.47-0.78x). Fonts and linewidths
+# were compensated for that squeeze, but the properties matplotlib does not
+# express in scaled units were not: hatch strokes are a fixed 1.0pt, so fig09's
+# and fig10's bar hatching printed at 0.5-0.8pt and read as grey wash rather
+# than as texture. At 1:1 there is nothing left to compensate.
+ONE_TO_ONE_WIDE = True
+
+PNG_DPI = 600      # drawing 1:1 halves the pixel count at a given dpi; 600 keeps
+                   # the rasters well above the 300dpi print floor either way
 
 PANEL_LEGENDS = False   # False: strip the per-panel legend, emit legend_*.pdf instead
 
@@ -96,17 +140,35 @@ def sty(source_w, print_w):
         'xtick.major.size':   3.5 * k,
         'ytick.major.size':   3.5 * k,
         'patch.linewidth':    0.6 * k,
+        # matplotlib draws hatch strokes at a fixed width that ignores the
+        # figure scale, so an oversized source figure printed them too fine
+        'hatch.linewidth':    0.9 * k,
         'legend.handlelength': 2.6,
         'figure.dpi':         150,
+        # the default whitegrid rules compete with 1.3pt curves for attention;
+        # keep them as a readable ruler, not as foreground
+        'grid.color':         '#B0B0B0',
+        'grid.alpha':         0.55,
+        'axes.axisbelow':     True,
     })
     return scale
 
 
 def st(c):
-    """Condition line style with the linewidth scaled to survive downscaling."""
-    d = dict(ST.get(c, dict(ls="-", lw=2.0)))
-    d["lw"] = d.get("lw", 2.0) * _K
+    """Condition line style with widths/dashes scaled to survive downscaling."""
+    d = dict(ST.get(c, dict(ls="-", lw=1.3)))
+    d["lw"] = d.get("lw", 1.3) * _K
+    if "dashes" in d:
+        d["dashes"] = tuple(v * _K for v in d["dashes"])
+    d["zorder"] = ZO.get(c, 2.0)
+    d.setdefault("solid_capstyle", "round")
+    d.setdefault("dash_capstyle", "round")
     return d
+
+
+def src_h(source_w, print_w, print_h):
+    """Source-figure height that lands at `print_h` inches once scaled to `print_w`."""
+    return print_h * (source_w / float(print_w))
 
 
 def _record(name, source_w, print_w):
@@ -120,7 +182,7 @@ def _actual_width(fname):
     """Width in inches of the file just written (tight bbox trims the nominal figsize)."""
     from PIL import Image
     with Image.open(f"{fname}.png") as im:
-        return im.width / 300.0
+        return im.width / float(PNG_DPI)
 
 
 _LEG_KW = dict(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False,
@@ -130,25 +192,14 @@ _LEG_KW = dict(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False,
 def _legend(ax, ncol=2):
     """
     With PANEL_LEGENDS the legend sits above the axes (never over the data).
-    Otherwise it is dropped and the canvas loses exactly the height the legend
-    would have occupied — removing it alone saves nothing, because tight_layout
-    simply expands the axes to refill a fixed figsize.
+    Otherwise it is simply not drawn: the figure heights above are already the
+    printed heights we want for the axes, so reclaiming the legend band would
+    undo exactly the vertical room this change is adding. (It also drove the
+    old fig05 canvas down to 3.1in, short enough that "Punishment Rate" ran off
+    the top of the image.)
     """
-    fig = ax.get_figure()
     if PANEL_LEGENDS:
         ax.legend(ncol=ncol, **_LEG_KW)
-        return
-    if getattr(fig, "_legend_dropped", False):
-        return                      # one shrink per figure, not per panel
-    handles, _ = ax.get_legend_handles_labels()
-    if handles:
-        leg = ax.legend(ncol=ncol, **_LEG_KW)
-        fig.canvas.draw()
-        band = leg.get_window_extent().height / fig.dpi
-        leg.remove()
-        w, h = fig.get_size_inches()
-        fig.set_size_inches(w, max(h - band, h * 0.5))
-    fig._legend_dropped = True
 
 
 def _legend_strip(entries, fname, print_w):
@@ -168,7 +219,7 @@ def _legend_strip(entries, fname, print_w):
     # its text is not rescaled; trim only the height down to the legend itself
     fig.set_size_inches(print_w, band * 1.3)
     for e in ["pdf", "png"]:
-        fig.savefig(f"{fname}.{e}", format=e, dpi=300)
+        fig.savefig(f"{fname}.{e}", format=e, dpi=PNG_DPI)
     plt.close(fig)
 
 
@@ -197,7 +248,9 @@ def _fit_y(ax):
     ax.margins(y=0.09)
     ax.autoscale_view()
     # fitting the range can leave only two ticks; keep enough to read values off
-    ax.yaxis.set_major_locator(MaxNLocator(nbins=5, steps=[1, 2, 2.5, 5, 10]))
+    # (6 rather than 5 — the taller panels have room for the extra gridline, and
+    # a denser ruler is what lets a reader resolve two curves that run close)
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=6, steps=[1, 2, 2.5, 5, 10]))
     lo, hi = ax.get_ylim()
     if lo < 0:
         # these metrics are all non-negative: keep a sliver below zero so a
@@ -223,13 +276,15 @@ def sm(x_2d, w=100):
 def plot_with_fill(ax, data, label, color, **kwargs):
     mean, std = sm(data)
     eps = np.arange(len(mean))
+    # every band sits under every line, so a wide band never hides a mean
+    ax.fill_between(eps, mean - std, mean + std, color=color,
+                    alpha=FILL_ALPHA, lw=0, zorder=1.0)
     ax.plot(eps, mean, label=label, color=color, **kwargs)
-    ax.fill_between(eps, mean - std, mean + std, color=color, alpha=0.15, lw=0)
 
 
 def _save(fig, fname):
     for e in ["pdf", "png"]:
-        fig.savefig(f"{fname}.{e}", format=e, bbox_inches="tight", dpi=300)
+        fig.savefig(f"{fname}.{e}", format=e, bbox_inches="tight", dpi=PNG_DPI)
     plt.close(fig)
     for rec in _AUDIT:                     # record the width actually written
         if rec["name"] == fname:
@@ -242,7 +297,7 @@ def _curve(R, key, ylabel, fname, panel_w, n_ep, conds=None):
     source_w = 6.5
     sty(source_w, panel_w)
     _record(fname, source_w, panel_w)
-    fig, ax = plt.subplots(figsize=(source_w, 4))
+    fig, ax = plt.subplots(figsize=(source_w, src_h(source_w, panel_w, PANEL_PRINT_H)))
     for c in (conds or MC):
         if c in R:
             plot_with_fill(ax, R[c][key], label=LB.get(c, c),
@@ -317,9 +372,10 @@ def _draw_all(R, print_w, panel_w):
     n_saved += 4
 
     # ── Fig 5: emergent social dynamics, full-width 3-panel strip ─────────
-    source_w = 15.0
+    source_w = print_w if ONE_TO_ONE_WIDE else 15.0
     sty(source_w, print_w); _record("fig05_social", source_w, print_w)
-    fig, axes = plt.subplots(1, 3, figsize=(source_w, 4))
+    fig, axes = plt.subplots(1, 3,
+                             figsize=(source_w, src_h(source_w, print_w, STRIP3_PRINT_H)))
     for c in ["DPF", "DERL"]:
         if c not in R:
             continue
@@ -337,9 +393,10 @@ def _draw_all(R, print_w, panel_w):
     n_saved += 1
 
     # ── Fig 6: cooperation + oracle accuracy, full-width 2-panel ──────────
-    source_w = 11.0
+    source_w = print_w if ONE_TO_ONE_WIDE else 11.0
     sty(source_w, print_w); _record("fig06_coop_oracle", source_w, print_w)
-    fig, (a1, a2) = plt.subplots(1, 2, figsize=(source_w, 4))
+    fig, (a1, a2) = plt.subplots(1, 2,
+                                 figsize=(source_w, src_h(source_w, print_w, STRIP2_PRINT_H)))
     for c in MC:
         if c not in R:
             continue
@@ -357,7 +414,7 @@ def _draw_all(R, print_w, panel_w):
     # ── Fig 7: cumulative reward ──────────────────────────────────────────
     source_w = 6.5
     sty(source_w, panel_w); _record("fig07_reward", source_w, panel_w)
-    fig, ax = plt.subplots(figsize=(source_w, 4))
+    fig, ax = plt.subplots(figsize=(source_w, src_h(source_w, panel_w, PANEL_PRINT_H)))
     for c in MC:
         if c not in R:
             continue
@@ -385,9 +442,9 @@ def _draw_all(R, print_w, panel_w):
         mets = ["truth", "gather", "lie", "mine", "punish"]
         mls  = [r"Truth $\uparrow$", r"Gather $\uparrow$",
                 r"Lie $\downarrow$", r"Mine $\downarrow$", "Punish"]
-        source_w = 9.0
+        source_w = print_w if ONE_TO_ONE_WIDE else 9.0
         sty(source_w, print_w); _record("fig09_ablation_punish", source_w, print_w)
-        fig, ax = plt.subplots(figsize=(source_w, 4.5))
+        fig, ax = plt.subplots(figsize=(source_w, src_h(source_w, print_w, BARS_PRINT_H)))
         x  = np.arange(len(mets))
         bw = 0.18
         cm = plt.cm.viridis
@@ -411,11 +468,12 @@ def _draw_all(R, print_w, panel_w):
 
     # ── Fig 10: adversarial coalition robustness ──────────────────────────
     if "DPF" in R and "AC" in R:
-        source_w = 14.0
+        source_w = print_w if ONE_TO_ONE_WIDE else 14.0
         sty(source_w, print_w); _record("fig10_collusion", source_w, print_w)
         # Panel A carries four category labels, so it needs more width than the
         # two curve panels or "Gather"/"Mine" collide at print size.
-        fig, axes = plt.subplots(1, 3, figsize=(source_w, 4),
+        fig, axes = plt.subplots(1, 3,
+                                 figsize=(source_w, src_h(source_w, print_w, STRIP3_PRINT_H)),
                                  gridspec_kw=dict(width_ratios=[1.35, 1, 1]))
         n_last = max(1, R["DPF"]["truth"].shape[1] // 5)
         s = slice(-n_last, None)
