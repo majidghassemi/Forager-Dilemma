@@ -24,8 +24,6 @@ build/
 *.log
 logs/
 checkpoints/
-checkpoints_ablation/
-checkpoints_qlearning/
 
 # OS
 Thumbs.db
