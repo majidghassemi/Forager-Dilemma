@@ -1,4 +1,4 @@
-"""
+r"""
 Generate paper figures from saved .npz checkpoints.
 
 Serves BOTH model families — tabular Q-learning and IPPO — because they emit
@@ -22,12 +22,18 @@ So fonts are set to `target_pt / scale`, making text land at TARGET_PT once the
 figure is scaled into the page. `--print-width` / `--panel-print-width` declare
 the widths the figures will occupy; `--audit` reports the resulting print sizes
 and how much headroom each figure has above the 7pt floor.
+
+Defaults follow the AAAI 2026 style (aaai2026.sty): \textwidth = 7.0in and
+\columnwidth = (7.0 - 0.375)/2 = 3.3125in. Figure sizes are unchanged from the
+originals, so the page budget is unaffected.
 """
 
 import os, argparse
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.ticker import MaxNLocator
+from matplotlib.lines import Line2D
+from matplotlib.patches import Patch
 
 CONDITIONS = ["SRB", "ES", "DPF", "DERL", "AC"]
 ABL_PRS    = [0.0, 0.5, 1.5, 3.0]
@@ -53,9 +59,16 @@ ST = {"SRB":  dict(ls="--", lw=2.2),
 # Hatching gives bars the redundant encoding that line style gives curves.
 HATCH = ["", "///", "\\\\\\", "xxx"]
 
+# AAAI 2026 page geometry (aaai2026.sty), US Letter with 0.75in side margins
+TEXT_WIDTH   = 7.0                              # \textwidth
+COLUMN_SEP   = 0.375                            # \columnsep
+COLUMN_WIDTH = (TEXT_WIDTH - COLUMN_SEP) / 2    # 3.3125in
+
 TARGET_PT = 10.0   # body / axis labels / ticks, once printed
 LEGEND_PT = 9.0    # legend, once printed
 MIN_PT    = 7.0    # reviewer's floor (\scriptsize)
+
+PANEL_LEGENDS = False   # False: strip the per-panel legend, emit legend_*.pdf instead
 
 _K = 1.0           # current font multiplier, set by sty()
 _AUDIT = []        # (figure, source_w, print_w) collected for --audit
@@ -97,18 +110,66 @@ def st(c):
 
 
 def _record(name, source_w, print_w):
-    _AUDIT.append((name, source_w, print_w))
+    # _K is the multiplier the fonts were actually set with (from the nominal
+    # figsize); actual_w is filled in after saving, since tight bbox trims.
+    _AUDIT.append(dict(name=name, nominal_w=source_w, print_w=print_w,
+                       k=_K, actual_w=source_w))
+
+
+def _actual_width(fname):
+    """Width in inches of the file just written (tight bbox trims the nominal figsize)."""
+    from PIL import Image
+    with Image.open(f"{fname}.png") as im:
+        return im.width / 300.0
+
+
+_LEG_KW = dict(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False,
+               columnspacing=1.2, handletextpad=0.5, borderaxespad=0.3)
 
 
 def _legend(ax, ncol=2):
     """
-    Legend above the axes rather than inside it. At 10pt print size the legend
-    block is large relative to a 3.4in panel, and inside the axes it covers the
-    data; above, it costs height instead of hiding curves.
+    With PANEL_LEGENDS the legend sits above the axes (never over the data).
+    Otherwise it is dropped and the canvas loses exactly the height the legend
+    would have occupied — removing it alone saves nothing, because tight_layout
+    simply expands the axes to refill a fixed figsize.
     """
-    ax.legend(loc="lower center", bbox_to_anchor=(0.5, 1.0),
-              ncol=ncol, frameon=False, columnspacing=1.2,
-              handletextpad=0.5, borderaxespad=0.3)
+    fig = ax.get_figure()
+    if PANEL_LEGENDS:
+        ax.legend(ncol=ncol, **_LEG_KW)
+        return
+    if getattr(fig, "_legend_dropped", False):
+        return                      # one shrink per figure, not per panel
+    handles, _ = ax.get_legend_handles_labels()
+    if handles:
+        leg = ax.legend(ncol=ncol, **_LEG_KW)
+        fig.canvas.draw()
+        band = leg.get_window_extent().height / fig.dpi
+        leg.remove()
+        w, h = fig.get_size_inches()
+        fig.set_size_inches(w, max(h - band, h * 0.5))
+    fig._legend_dropped = True
+
+
+def _legend_strip(entries, fname, print_w):
+    """
+    Standalone one-row key, drawn at its printed width so its text is exactly
+    LEGEND_PT with no rescaling. Include once above a composite.
+    entries: list of (label, artist).
+    """
+    sty(print_w, print_w)           # k = 1, so the text is exactly LEGEND_PT
+    fig = plt.figure(figsize=(print_w, 1.0))
+    leg = fig.legend([e[1] for e in entries], [e[0] for e in entries],
+                     loc="center", ncol=len(entries), frameon=False,
+                     columnspacing=1.6, handletextpad=0.6, handlelength=2.6)
+    fig.canvas.draw()
+    band = leg.get_window_extent().height / fig.dpi
+    # keep the full print width (no tight bbox) so the strip is placed 1:1 and
+    # its text is not rescaled; trim only the height down to the legend itself
+    fig.set_size_inches(print_w, band * 1.3)
+    for e in ["pdf", "png"]:
+        fig.savefig(f"{fname}.{e}", format=e, dpi=300)
+    plt.close(fig)
 
 
 def _episode_axis(ax, n_ep):
@@ -170,6 +231,10 @@ def _save(fig, fname):
     for e in ["pdf", "png"]:
         fig.savefig(f"{fname}.{e}", format=e, bbox_inches="tight", dpi=300)
     plt.close(fig)
+    for rec in _AUDIT:                     # record the width actually written
+        if rec["name"] == fname:
+            rec["actual_w"] = _actual_width(fname)
+            break
 
 
 def _curve(R, key, ylabel, fname, panel_w, n_ep, conds=None):
@@ -228,7 +293,7 @@ def load_checkpoints(ckpt_dir, seeds):
     return R
 
 
-def make_plots(R, od, print_w=7.0, panel_w=3.4):
+def make_plots(R, od, print_w=TEXT_WIDTH, panel_w=COLUMN_WIDTH):
     os.makedirs(od, exist_ok=True)
     orig_dir = os.getcwd()
     os.chdir(od)
@@ -380,39 +445,74 @@ def _draw_all(R, print_w, panel_w):
         _save(fig, "fig10_collusion")
         n_saved += 1
 
+    if not PANEL_LEGENDS:
+        n_saved += _draw_legend_strips(R, print_w)
+
     return n_saved
+
+
+def _draw_legend_strips(R, print_w):
+    """
+    One key per distinct series set, to be included once above its figure:
+      legend_conditions -> figs 1-4, 6, 7, 8   (Figures 2, 4, 5)
+      legend_dpf_derl   -> fig05               (Figure 3)
+      legend_dpf_ac     -> fig10               (Figure 7)
+      legend_ablation   -> fig09               (Figure 6)
+    """
+    def line(c):
+        return Line2D([0], [0], color=CL[c], **ST[c])
+
+    n = 0
+    conds = [c for c in MC if c in R]
+    if conds:
+        _legend_strip([(LB[c], line(c)) for c in conds],
+                      "legend_conditions", print_w); n += 1
+    pair = [c for c in ("DPF", "DERL") if c in R]
+    if len(pair) == 2:
+        _legend_strip([(LB[c], line(c)) for c in pair],
+                      "legend_dpf_derl", print_w); n += 1
+    if "DPF" in R and "AC" in R:
+        _legend_strip([(LB[c], line(c)) for c in ("DPF", "AC")],
+                      "legend_dpf_ac", print_w); n += 1
+    if "abl_pr" in R:
+        keys = sorted(R["abl_pr"].keys())
+        cm = plt.cm.viridis
+        ents = [(f"pun_rew={k}",
+                 Patch(facecolor=cm(i / max(len(keys) - 1, 1)),
+                       hatch=HATCH[i % len(HATCH)], edgecolor="white"))
+                for i, k in enumerate(keys)]
+        _legend_strip(ents, "legend_ablation", print_w); n += 1
+    print(f"  {n} legend strip(s) written")
+    return n
 
 
 def print_audit():
     """Effective printed point sizes, and headroom above the 7pt floor."""
-    print(f"\n{'='*82}")
+    print(f"\n{'='*88}")
     print(f"  FONT AUDIT — target {TARGET_PT:.0f}pt body / {LEGEND_PT:.0f}pt legend, "
           f"floor {MIN_PT:.0f}pt")
-    print(f"{'='*82}")
-    print(f"  {'figure':<26}{'drawn':>8}{'print':>8}"
-          f"{'src body':>10}{'src leg':>9}{'-> body':>9}{'-> leg':>8}"
-          f"{'floor at':>10}  ok")
-    print(f"  {'-'*76}")
+    print(f"{'='*88}")
+    print(f"  {'figure':<26}{'saved':>8}{'print':>8}"
+          f"{'in file':>9}{'-> body':>9}{'-> leg':>8}{'floor at':>10}  ok")
+    print(f"  {'-'*82}")
     ok_all = True
-    for name, sw, pw in _AUDIT:
-        # what is literally embedded in the PDF
-        src_body = TARGET_PT * sw / pw
-        src_leg  = LEGEND_PT * sw / pw
-        # what it measures once scaled to pw: src * (pw/sw) -> back to target
-        eff_body = src_body * pw / sw
-        eff_leg  = src_leg  * pw / sw
-        # printed width at which the legend would hit the 7pt floor
-        floor_w = pw * MIN_PT / LEGEND_PT
+    for r in _AUDIT:
+        src_body = TARGET_PT * r["k"]          # what is embedded in the file
+        src_leg  = LEGEND_PT * r["k"]
+        ratio    = r["print_w"] / r["actual_w"]
+        eff_body = src_body * ratio            # what it measures on the page
+        eff_leg  = src_leg  * ratio
+        floor_w  = r["actual_w"] * MIN_PT / src_leg
         ok = eff_leg >= MIN_PT and eff_body >= MIN_PT
         ok_all &= ok
-        print(f"  {name:<26}{sw:>7.1f}\"{pw:>7.1f}\""
-              f"{src_body:>10.1f}{src_leg:>9.1f}{eff_body:>9.1f}{eff_leg:>8.1f}"
+        print(f"  {r['name']:<26}{r['actual_w']:>7.1f}\"{r['print_w']:>7.1f}\""
+              f"{src_body:>9.1f}{eff_body:>9.1f}{eff_leg:>8.1f}"
               f"{floor_w:>9.1f}\"  {'yes' if ok else 'NO'}")
-    print(f"  {'-'*76}")
-    print(f"  All figures clear the {MIN_PT:.0f}pt floor: "
-          f"{'YES' if ok_all else 'NO'}")
-    print(f"  Legends stay >= {MIN_PT:.0f}pt as long as a figure is not printed "
-          f"narrower than {MIN_PT/LEGEND_PT:.0%} of its stated width.")
+    print(f"  {'-'*82}")
+    print(f"  All figures clear the {MIN_PT:.0f}pt floor: {'YES' if ok_all else 'NO'}")
+    lo = min(r["print_w"] / r["actual_w"] * LEGEND_PT * r["k"] for r in _AUDIT)
+    hi = max(r["print_w"] / r["actual_w"] * TARGET_PT * r["k"] for r in _AUDIT)
+    print(f"  Body text lands at {hi:.1f}pt; smallest legend lands at {lo:.1f}pt.")
 
 
 if __name__ == "__main__":
@@ -420,13 +520,20 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint-dir", default="checkpoints")
     parser.add_argument("--outdir",         default="plots/v4_ppo")
     parser.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44, 45, 46])
-    parser.add_argument("--print-width", type=float, default=7.0,
-                        help="printed width (in) of the full-width multi-panel figures")
-    parser.add_argument("--panel-print-width", type=float, default=3.4,
-                        help="printed width (in) of a single panel inside a 2x2 composite")
+    parser.add_argument("--print-width", type=float, default=TEXT_WIDTH,
+                        help=f"printed width (in) of full-width figures "
+                             f"(default {TEXT_WIDTH}in = AAAI \\textwidth)")
+    parser.add_argument("--panel-print-width", type=float, default=COLUMN_WIDTH,
+                        help=f"printed width (in) of one panel of a composite "
+                             f"(default {COLUMN_WIDTH}in = AAAI \\columnwidth)")
+    parser.add_argument("--inline-legends", action="store_true",
+                        help="keep a legend on every panel instead of emitting "
+                             "standalone legend_*.pdf strips")
     parser.add_argument("--audit", action="store_true",
                         help="report effective printed point sizes")
     args = parser.parse_args()
+
+    PANEL_LEGENDS = args.inline_legends
 
     print(f"Loading checkpoints from {args.checkpoint_dir} ...")
     R = load_checkpoints(args.checkpoint_dir, args.seeds)
