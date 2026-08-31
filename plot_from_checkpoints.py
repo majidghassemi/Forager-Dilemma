@@ -154,6 +154,13 @@ FILL_ALPHA = 0.10  # +/-1 sigma band; 0.15 turned overlapping bands into fog
 FORMATS = ["pdf"]  # vector only: text stays crisp and the type is set, not
                    # resampled. Add "png" here for a quick on-screen look.
 
+# Every figure is ALSO written as a raster copy under <outdir>/PNG_SUBDIR, for
+# slides, previews and anywhere a PDF cannot be dropped in. The PDFs stay alone
+# at the top of the outdir so the LaTeX \graphicspath never picks a raster by
+# accident. Set PNG_DPI to 0 (or --png-dpi 0) to skip them.
+PNG_SUBDIR = "png"
+PNG_DPI    = 600   # 1:1 figsize x 600dpi: a 3.3125in column lands at ~1988px
+
 PANEL_LEGENDS = False   # False: strip the per-panel legend, emit legend_*.pdf instead
 
 _AUDIT = []        # (figure, width, height) collected for --audit
@@ -324,8 +331,7 @@ def _legend_strip(entries, fname, print_w):
     # its text is not rescaled; trim only the height down to the legend itself
     fig.set_size_inches(print_w, band * 1.3)
     _record(fname, print_w, band * 1.3)
-    for e in FORMATS:
-        fig.savefig(f"{fname}.{e}", format=e)
+    _write(fig, fname)
     plt.close(fig)
 
 
@@ -391,15 +397,26 @@ def plot_with_fill(ax, data, label, color, **kwargs):
     ax.plot(eps, mean, label=label, color=color, **kwargs)
 
 
-def _save(fig, fname):
+def _write(fig, fname):
     """
-    Write at the nominal figsize. No bbox_inches="tight": trimming would make
-    the file narrower than the column, LaTeX's `width=` would scale it back up,
-    and the type would print larger than it was set. tight_layout has already
-    fitted the content inside the declared size.
+    Write every requested vector format at the nominal figsize, then the raster
+    copy into PNG_SUBDIR/. No bbox_inches="tight": trimming would make the file
+    narrower than the column, LaTeX's `width=` would scale it back up, and the
+    type would print larger than it was set. tight_layout has already fitted
+    the content inside the declared size. The PNG is the same figure at the
+    same 1:1 size, so it carries the same layout — only rasterised.
     """
     for e in FORMATS:
         fig.savefig(f"{fname}.{e}", format=e)
+    if PNG_DPI:
+        os.makedirs(PNG_SUBDIR, exist_ok=True)
+        fig.savefig(os.path.join(PNG_SUBDIR, f"{fname}.png"),
+                    format="png", dpi=PNG_DPI)
+
+
+def _save(fig, fname):
+    """Write the figure in every format, then drop it."""
+    _write(fig, fname)
     plt.close(fig)
 
 
@@ -466,7 +483,11 @@ def make_plots(R, od, print_w=TEXT_WIDTH, panel_w=COLUMN_WIDTH):
         n_saved = _draw_all(R, print_w, panel_w)
     finally:
         os.chdir(orig_dir)
-    print(f"\n  {n_saved} figures ({' + '.join(FORMATS)}) saved → {od}/")
+    fmts = " + ".join(FORMATS)
+    print(f"\n  {n_saved} figures ({fmts}) saved → {od}/")
+    if PNG_DPI:
+        print(f"  {n_saved} png copies at {PNG_DPI}dpi → "
+              f"{os.path.join(od, PNG_SUBDIR)}/")
     return n_saved
 
 
@@ -723,12 +744,17 @@ if __name__ == "__main__":
                              "figure* spanning \\textwidth, 'column' to rebuild "
                              "them stacked inside one \\columnwidth (what a "
                              "plain `figure` environment gives them)")
+    parser.add_argument("--png-dpi", type=int, default=PNG_DPI,
+                        help=f"resolution of the raster copies written to "
+                             f"<outdir>/{PNG_SUBDIR}/ (default {PNG_DPI}); "
+                             f"0 writes no PNGs")
     parser.add_argument("--audit", action="store_true",
                         help="report effective printed point sizes")
     args = parser.parse_args()
 
     PANEL_LEGENDS = args.inline_legends
     LAYOUT = args.layout
+    PNG_DPI = args.png_dpi
 
     print(f"Loading checkpoints from {args.checkpoint_dir} ...")
     R = load_checkpoints(args.checkpoint_dir, args.seeds)
