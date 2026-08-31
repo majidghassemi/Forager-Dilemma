@@ -15,18 +15,29 @@ differs:
 
 Typography
 ----------
-Figures are drawn wider than they are printed, and LaTeX's `width=` shrinks all
-text with the image:
+Every figure is drawn at exactly the size it occupies on the page — figsize ==
+printed width — so LaTeX's `width=` is a 1:1 include and nothing is resampled:
 
-    effective_pt = source_pt * (print_width / source_width)
+    \includegraphics[width=\columnwidth]{fig01_epistemic}    % no height=
 
-So fonts are set to `target_pt / scale`, making text land at TARGET_PT once the
-figure is scaled into the page. `--print-width` / `--panel-print-width` declare
-the widths the figures will occupy; `--audit` reports the resulting print sizes
-and how much headroom each figure has above the 7pt floor.
+The point sizes below are therefore literal: the 8pt set here is the 8pt that
+prints, and the 7pt legend prints at 7pt. Nothing is pre-compensated for a
+downscale, because there is no downscale. `--audit` reports the printed sizes.
+
+Include with `width=` ONLY. A `height=...` or `keepaspectratio` cap makes height
+the binding constraint, shrinks the figure below 1:1, and takes the type under
+the 7pt floor with it. `--print-width` / `--panel-print-width` declare the widths
+the figures are drawn at and printed at.
 
 Defaults follow the AAAI 2026 style (aaai2026.sty): \textwidth = 7.0in and
 \columnwidth = (7.0 - 0.375)/2 = 3.3125in.
+
+Output is vector PDF (Type 42 embedded fonts, never Type 3), so text stays
+crisp at any zoom and the printer sets it rather than resampling a raster. It is
+saved at the nominal figsize with NO tight bounding box: a tight bbox trims the
+canvas, and LaTeX would then scale the trimmed file back up to `width=` and
+enlarge the type with it. `tight_layout` already fits the content inside the
+declared size, so the trim is not needed.
 
 Printed WIDTHS are unchanged from the camera-ready originals — nothing here
 shrinks a figure. Only the printed heights change (PANEL_PRINT_H and friends),
@@ -41,17 +52,12 @@ the paper puts them in:
 
 The paper uses plain `figure`, so `column` is what it needs. Building them wide
 and letting LaTeX squeeze 6.90in into a 3.28in column is a 0.48x scale that puts
-10pt type at 4.8pt, under the 7pt floor. Stacked, each panel gets the full
+8pt type at 3.8pt, well under the 7pt floor. Stacked, each panel gets the full
 column at 1:1.
 
 NOTE: the stacked figures are taller than the caps in the paper's
 \includegraphics. Any `height=...,keepaspectratio` on these four must be
 dropped, or height binds instead of width and shrinks them further than before.
-
-Either layout is drawn 1:1 — source width == print width, scale == 1 — so
-nothing is resampled into the page and properties matplotlib does not express
-in scaled units (hatch stroke width above all) come out at their intended size.
-Set ONE_TO_ONE_WIDE = False to go back to oversized sources.
 """
 
 import os, argparse
@@ -77,7 +83,7 @@ LB = {"SRB":  "SRB",
       "DERL": "DERL (Ours)",
       "AC":   "AC"}
 # Line style is the second, colour-independent encoding. `lw` and `dashes` are
-# in PRINTED points: st() multiplies them by _K so they survive the downscale.
+# in PRINTED points and, at 1:1, are used as written.
 #
 # Every dash period is a different length, which is what keeps series apart
 # where they coincide exactly — SRB and ES both sit at 0.0 for most of figs 1-4,
@@ -99,8 +105,11 @@ TEXT_WIDTH   = 7.0                              # \textwidth
 COLUMN_SEP   = 0.375                            # \columnsep
 COLUMN_WIDTH = (TEXT_WIDTH - COLUMN_SEP) / 2    # 3.3125in
 
-TARGET_PT = 10.0   # body / axis labels / ticks, once printed
-LEGEND_PT = 9.0    # legend, once printed
+# Printed point sizes. Drawn 1:1, so these are literal: what is set here is
+# what measures on the page. 8pt is the AAAI floor for readable axis type and
+# 7pt (\scriptsize) is the reviewer's hard floor, which the legend sits on.
+TARGET_PT = 8.0    # axis labels, tick labels, panel titles
+LEGEND_PT = 7.0    # legends and the standalone legend strips
 MIN_PT    = 7.0    # reviewer's floor (\scriptsize)
 
 # Printed HEIGHT of the drawing area, in inches. Widths are fixed by the column
@@ -126,75 +135,67 @@ LAYOUT = "wide"         # "wide" (figure*, 7.0in) | "column" (figure, 3.3125in)
 
 FILL_ALPHA = 0.10  # +/-1 sigma band; 0.15 turned overlapping bands into fog
 
-# The four \textwidth figures are drawn 1:1 — source width == printed width, so
-# scale = 1 and nothing is resampled on the way into the page. They used to be
-# drawn 9-15in wide and squeezed into 7in (0.47-0.78x). Fonts and linewidths
-# were compensated for that squeeze, but the properties matplotlib does not
-# express in scaled units were not: hatch strokes are a fixed 1.0pt, so fig09's
-# and fig10's bar hatching printed at 0.5-0.8pt and read as grey wash rather
-# than as texture. At 1:1 there is nothing left to compensate.
-ONE_TO_ONE_WIDE = True
+# EVERY figure is drawn 1:1 — figsize == printed width, so scale == 1 and
+# nothing is resampled on the way into the page. Figures used to be drawn
+# 6.5-15in wide and squeezed down by LaTeX. Fonts and linewidths were
+# compensated for that squeeze, but the properties matplotlib does not express
+# in scaled units were not: hatch strokes are a fixed 1.0pt, so fig09's and
+# fig10's bar hatching printed at 0.5-0.8pt and read as grey wash rather than
+# as texture. At 1:1 there is nothing left to compensate.
 
-PNG_DPI = 600      # drawing 1:1 halves the pixel count at a given dpi; 600 keeps
-                   # the rasters well above the 300dpi print floor either way
+FORMATS = ["pdf"]  # vector only: text stays crisp and the type is set, not
+                   # resampled. Add "png" here for a quick on-screen look.
 
 PANEL_LEGENDS = False   # False: strip the per-panel legend, emit legend_*.pdf instead
 
-_K = 1.0           # current font multiplier, set by sty()
-_AUDIT = []        # (figure, source_w, print_w) collected for --audit
+_AUDIT = []        # (figure, width, height) collected for --audit
 
 
-def sty(source_w, print_w):
-    """Style for a figure `source_w` inches wide that will print at `print_w`."""
-    global _K
-    scale = print_w / float(source_w)
-    _K = 1.0 / scale
-    k = _K
+def sty():
+    """
+    Style shared by every figure. Drawn 1:1, so every size below is in printed
+    points and inches — there is no scale factor to divide out.
+    """
     plt.style.use('seaborn-v0_8-whitegrid')
     plt.rcParams.update({
         'font.family':       'serif',
-        'font.size':          TARGET_PT * k,
-        'axes.titlesize':     TARGET_PT * k,
-        'axes.labelsize':     TARGET_PT * k,
-        'xtick.labelsize':    TARGET_PT * k,
-        'ytick.labelsize':    TARGET_PT * k,
-        'legend.fontsize':    LEGEND_PT * k,
-        'axes.linewidth':     0.8 * k,
-        'grid.linewidth':     0.6 * k,
-        'xtick.major.width':  0.8 * k,
-        'ytick.major.width':  0.8 * k,
-        'xtick.major.size':   3.5 * k,
-        'ytick.major.size':   3.5 * k,
-        'patch.linewidth':    0.6 * k,
+        'font.size':          TARGET_PT,
+        'axes.titlesize':     TARGET_PT,
+        'axes.labelsize':     TARGET_PT,
+        'xtick.labelsize':    TARGET_PT,
+        'ytick.labelsize':    TARGET_PT,
+        'legend.fontsize':    LEGEND_PT,
+        'axes.linewidth':     0.8,
+        'grid.linewidth':     0.6,
+        'xtick.major.width':  0.8,
+        'ytick.major.width':  0.8,
+        'xtick.major.size':   3.5,
+        'ytick.major.size':   3.5,
+        'patch.linewidth':    0.6,
         # matplotlib draws hatch strokes at a fixed width that ignores the
-        # figure scale, so an oversized source figure printed them too fine
-        'hatch.linewidth':    0.9 * k,
+        # figure scale; at 1:1 the value asked for is the value printed
+        'hatch.linewidth':    0.9,
         'legend.handlelength': 2.6,
         'figure.dpi':         150,
+        # embed real outline fonts. matplotlib's default (Type 3) is rejected
+        # by most camera-ready checkers and renders poorly in some viewers
+        'pdf.fonttype':       42,
+        'ps.fonttype':        42,
         # the default whitegrid rules compete with 1.3pt curves for attention;
         # keep them as a readable ruler, not as foreground
         'grid.color':         '#B0B0B0',
         'grid.alpha':         0.55,
         'axes.axisbelow':     True,
     })
-    return scale
 
 
 def st(c):
-    """Condition line style with widths/dashes scaled to survive downscaling."""
+    """Condition line style. Widths and dashes are already in printed points."""
     d = dict(ST.get(c, dict(ls="-", lw=1.3)))
-    d["lw"] = d.get("lw", 1.3) * _K
-    if "dashes" in d:
-        d["dashes"] = tuple(v * _K for v in d["dashes"])
     d["zorder"] = ZO.get(c, 2.0)
     d.setdefault("solid_capstyle", "round")
     d.setdefault("dash_capstyle", "round")
     return d
-
-
-def src_h(source_w, print_w, print_h):
-    """Source-figure height that lands at `print_h` inches once scaled to `print_w`."""
-    return print_h * (source_w / float(print_w))
 
 
 def stacked():
@@ -218,12 +219,13 @@ def composite(name, nax, print_w, wide_h, col_h, width_ratios=None, sharex=True)
     Returns (fig, axes).
     """
     pw = COLUMN_WIDTH if stacked() else print_w
-    sty(pw, pw)
-    _record(name, pw, pw)
+    ph = col_h if stacked() else wide_h
+    sty()
+    _record(name, pw, ph)
     if stacked():
-        fig, axes = plt.subplots(nax, 1, figsize=(pw, col_h), sharex=sharex)
+        fig, axes = plt.subplots(nax, 1, figsize=(pw, ph), sharex=sharex)
     else:
-        fig, axes = plt.subplots(1, nax, figsize=(pw, wide_h),
+        fig, axes = plt.subplots(1, nax, figsize=(pw, ph),
                                  gridspec_kw=(dict(width_ratios=width_ratios)
                                               if width_ratios else None))
     return fig, np.atleast_1d(axes)
@@ -251,18 +253,10 @@ def episode_axis_for(axes, n_ep, shared=True):
         _episode_axis(a, n_ep)
 
 
-def _record(name, source_w, print_w):
-    # _K is the multiplier the fonts were actually set with (from the nominal
-    # figsize); actual_w is filled in after saving, since tight bbox trims.
-    _AUDIT.append(dict(name=name, nominal_w=source_w, print_w=print_w,
-                       k=_K, actual_w=source_w))
-
-
-def _actual_width(fname):
-    """Width in inches of the file just written (tight bbox trims the nominal figsize)."""
-    from PIL import Image
-    with Image.open(f"{fname}.png") as im:
-        return im.width / float(PNG_DPI)
+def _record(name, w, h):
+    # saved with no tight bbox, so the figsize IS the size of the file and the
+    # size on the page — nothing to measure back off the written image
+    _AUDIT.append(dict(name=name, w=w, h=h))
 
 
 _LEG_KW = dict(loc="lower center", bbox_to_anchor=(0.5, 1.0), frameon=False,
@@ -284,22 +278,36 @@ def _legend(ax, ncol=2):
 
 def _legend_strip(entries, fname, print_w):
     """
-    Standalone one-row key, drawn at its printed width so its text is exactly
-    LEGEND_PT with no rescaling. Include once above a composite.
+    Standalone key, drawn at the width of the figure it sits above so its text
+    is exactly LEGEND_PT with no rescaling. Include once above that figure, at
+    the same `width=` — a strip built for \\textwidth and dropped into a
+    \\columnwidth slot lands at 3.3pt.
+
+    One row if the entries fit; otherwise as few rows as do. Nothing here is
+    saved with a tight bbox, so an overflowing row would be clipped at the
+    figure edge rather than spilling visibly.
     entries: list of (label, artist).
     """
-    sty(print_w, print_w)           # k = 1, so the text is exactly LEGEND_PT
+    sty()                           # 1:1, so the text is exactly LEGEND_PT
     fig = plt.figure(figsize=(print_w, 1.0))
-    leg = fig.legend([e[1] for e in entries], [e[0] for e in entries],
-                     loc="center", ncol=len(entries), frameon=False,
-                     columnspacing=1.6, handletextpad=0.6, handlelength=2.6)
-    fig.canvas.draw()
-    band = leg.get_window_extent().height / fig.dpi
+    n = len(entries)
+    for rows in range(1, n + 1):
+        ncol = -(-n // rows)        # ceil: fill each row before starting another
+        leg = fig.legend([e[1] for e in entries], [e[0] for e in entries],
+                         loc="center", ncol=ncol, frameon=False,
+                         columnspacing=1.6, handletextpad=0.6, handlelength=2.6)
+        fig.canvas.draw()
+        box = leg.get_window_extent()
+        if box.width / fig.dpi <= print_w or rows == n:
+            break
+        leg.remove()
+    band = box.height / fig.dpi
     # keep the full print width (no tight bbox) so the strip is placed 1:1 and
     # its text is not rescaled; trim only the height down to the legend itself
     fig.set_size_inches(print_w, band * 1.3)
-    for e in ["pdf", "png"]:
-        fig.savefig(f"{fname}.{e}", format=e, dpi=PNG_DPI)
+    _record(fname, print_w, band * 1.3)
+    for e in FORMATS:
+        fig.savefig(f"{fname}.{e}", format=e)
     plt.close(fig)
 
 
@@ -366,21 +374,22 @@ def plot_with_fill(ax, data, label, color, **kwargs):
 
 
 def _save(fig, fname):
-    for e in ["pdf", "png"]:
-        fig.savefig(f"{fname}.{e}", format=e, bbox_inches="tight", dpi=PNG_DPI)
+    """
+    Write at the nominal figsize. No bbox_inches="tight": trimming would make
+    the file narrower than the column, LaTeX's `width=` would scale it back up,
+    and the type would print larger than it was set. tight_layout has already
+    fitted the content inside the declared size.
+    """
+    for e in FORMATS:
+        fig.savefig(f"{fname}.{e}", format=e)
     plt.close(fig)
-    for rec in _AUDIT:                     # record the width actually written
-        if rec["name"] == fname:
-            rec["actual_w"] = _actual_width(fname)
-            break
 
 
 def _curve(R, key, ylabel, fname, panel_w, n_ep, conds=None):
     """Single-panel figure. No title — the LaTeX caption carries that."""
-    source_w = 6.5
-    sty(source_w, panel_w)
-    _record(fname, source_w, panel_w)
-    fig, ax = plt.subplots(figsize=(source_w, src_h(source_w, panel_w, PANEL_PRINT_H)))
+    sty()
+    _record(fname, panel_w, PANEL_PRINT_H)
+    fig, ax = plt.subplots(figsize=(panel_w, PANEL_PRINT_H))
     for c in (conds or MC):
         if c in R:
             plot_with_fill(ax, R[c][key], label=LB.get(c, c),
@@ -439,7 +448,7 @@ def make_plots(R, od, print_w=TEXT_WIDTH, panel_w=COLUMN_WIDTH):
         n_saved = _draw_all(R, print_w, panel_w)
     finally:
         os.chdir(orig_dir)
-    print(f"\n  {n_saved} figures (PDF + PNG) saved → {od}/")
+    print(f"\n  {n_saved} figures ({' + '.join(FORMATS)}) saved → {od}/")
     return n_saved
 
 
@@ -492,9 +501,8 @@ def _draw_all(R, print_w, panel_w):
     n_saved += 1
 
     # ── Fig 7: cumulative reward ──────────────────────────────────────────
-    source_w = 6.5
-    sty(source_w, panel_w); _record("fig07_reward", source_w, panel_w)
-    fig, ax = plt.subplots(figsize=(source_w, src_h(source_w, panel_w, PANEL_PRINT_H)))
+    sty(); _record("fig07_reward", panel_w, PANEL_PRINT_H)
+    fig, ax = plt.subplots(figsize=(panel_w, PANEL_PRINT_H))
     for c in MC:
         if c not in R:
             continue
@@ -523,9 +531,9 @@ def _draw_all(R, print_w, panel_w):
         mls  = [r"Truth $\uparrow$", r"Gather $\uparrow$",
                 r"Lie $\downarrow$", r"Mine $\downarrow$", "Punish"]
         pw = COLUMN_WIDTH if stacked() else print_w
-        sty(pw, pw); _record("fig09_ablation_punish", pw, pw)
-        fig, ax = plt.subplots(figsize=(pw, COL_BARS_H if stacked()
-                                        else BARS_PRINT_H))
+        ph = COL_BARS_H if stacked() else BARS_PRINT_H
+        sty(); _record("fig09_ablation_punish", pw, ph)
+        fig, ax = plt.subplots(figsize=(pw, ph))
         x  = np.arange(len(mets))
         bw = 0.18
         cm = plt.cm.viridis
@@ -536,7 +544,7 @@ def _draw_all(R, print_w, panel_w):
             args = dict(label=f"pun_rew={k}",
                         color=cm(i / max(len(keys) - 1, 1)),
                         hatch=HATCH[i % len(HATCH)],
-                        edgecolor="white", linewidth=0.6 * _K)
+                        edgecolor="white", linewidth=0.6)
             if stacked():
                 # 20 vertical bars inside 3.31in leaves each 0.11in wide and the
                 # five category labels overlapping; horizontally the column's
@@ -575,9 +583,9 @@ def _draw_all(R, print_w, panel_w):
         ev = [np.mean(ed[m][:, s]) for m in ms]
         cv = [np.mean(cd[m][:, s]) for m in ms]
         axes[0].bar(xp - 0.17, ev, 0.32, label="DPF", color=CL["DPF"],
-                    hatch="", edgecolor="white", linewidth=0.6 * _K)
+                    hatch="", edgecolor="white", linewidth=0.6)
         axes[0].bar(xp + 0.17, cv, 0.32, label="AC", color=CL["AC"],
-                    hatch="///", edgecolor="white", linewidth=0.6 * _K)
+                    hatch="///", edgecolor="white", linewidth=0.6)
         axes[0].set_xticks(xp); axes[0].set_xticklabels(ls)
         panel_label(axes[0], "Rate"); _legend(axes[0], ncol=2)
         plot_with_fill(axes[1], ed["coop"], "DPF", CL["DPF"], **st("DPF"))
@@ -602,34 +610,44 @@ def _draw_all(R, print_w, panel_w):
         n_saved += 1
 
     if not PANEL_LEGENDS:
-        n_saved += _draw_legend_strips(R, print_w)
+        n_saved += _draw_legend_strips(R, print_w, panel_w)
 
     return n_saved
 
 
-def _draw_legend_strips(R, print_w):
+def _draw_legend_strips(R, print_w, panel_w):
     """
     One key per distinct series set, to be included once above its figure:
       legend_conditions -> figs 1-4, 6, 7, 8   (Figures 2, 4, 5)
       legend_dpf_derl   -> fig05               (Figure 3)
       legend_dpf_ac     -> fig10               (Figure 7)
       legend_ablation   -> fig09               (Figure 6)
+
+    Each strip is drawn at the width of the figure it accompanies, so both are
+    included at the same `width=` and both are 1:1. Stacked, every figure is one
+    column wide; side by side, the composites span \\textwidth while the single
+    panels stay in a column. legend_conditions serves both kinds, so it takes
+    the panel width — the narrower of the two, which still centres above a
+    \\textwidth figure rather than overrunning it.
     """
     def line(c):
         return Line2D([0], [0], color=CL[c], **ST[c])
 
+    col = COLUMN_WIDTH if stacked() else None
+    wide_w  = col or print_w        # strips above figs 5, 6, 9, 10
+    panel_wd = col or panel_w       # strips above the single panels
     n = 0
     conds = [c for c in MC if c in R]
     if conds:
         _legend_strip([(LB[c], line(c)) for c in conds],
-                      "legend_conditions", print_w); n += 1
+                      "legend_conditions", panel_wd); n += 1
     pair = [c for c in ("DPF", "DERL") if c in R]
     if len(pair) == 2:
         _legend_strip([(LB[c], line(c)) for c in pair],
-                      "legend_dpf_derl", print_w); n += 1
+                      "legend_dpf_derl", wide_w); n += 1
     if "DPF" in R and "AC" in R:
         _legend_strip([(LB[c], line(c)) for c in ("DPF", "AC")],
-                      "legend_dpf_ac", print_w); n += 1
+                      "legend_dpf_ac", wide_w); n += 1
     if "abl_pr" in R:
         keys = sorted(R["abl_pr"].keys())
         cm = plt.cm.viridis
@@ -637,38 +655,29 @@ def _draw_legend_strips(R, print_w):
                  Patch(facecolor=cm(i / max(len(keys) - 1, 1)),
                        hatch=HATCH[i % len(HATCH)], edgecolor="white"))
                 for i, k in enumerate(keys)]
-        _legend_strip(ents, "legend_ablation", print_w); n += 1
+        _legend_strip(ents, "legend_ablation", wide_w); n += 1
     print(f"  {n} legend strip(s) written")
     return n
 
 
 def print_audit():
-    """Effective printed point sizes, and headroom above the 7pt floor."""
-    print(f"\n{'='*88}")
-    print(f"  FONT AUDIT — target {TARGET_PT:.0f}pt body / {LEGEND_PT:.0f}pt legend, "
-          f"floor {MIN_PT:.0f}pt")
-    print(f"{'='*88}")
-    print(f"  {'figure':<26}{'saved':>8}{'print':>8}"
-          f"{'in file':>9}{'-> body':>9}{'-> leg':>8}{'floor at':>10}  ok")
-    print(f"  {'-'*82}")
-    ok_all = True
+    """Printed geometry and point sizes. Drawn 1:1, so set == printed."""
+    print(f"\n{'='*74}")
+    print(f"  FONT AUDIT — {TARGET_PT:.0f}pt axis type / {LEGEND_PT:.0f}pt legend, "
+          f"floor {MIN_PT:.0f}pt, drawn 1:1")
+    print(f"{'='*74}")
+    print(f"  {'figure':<28}{'width':>9}{'height':>9}{'axis pt':>9}"
+          f"{'leg pt':>8}  ok")
+    print(f"  {'-'*68}")
+    ok_all = TARGET_PT >= MIN_PT and LEGEND_PT >= MIN_PT
     for r in _AUDIT:
-        src_body = TARGET_PT * r["k"]          # what is embedded in the file
-        src_leg  = LEGEND_PT * r["k"]
-        ratio    = r["print_w"] / r["actual_w"]
-        eff_body = src_body * ratio            # what it measures on the page
-        eff_leg  = src_leg  * ratio
-        floor_w  = r["actual_w"] * MIN_PT / src_leg
-        ok = eff_leg >= MIN_PT and eff_body >= MIN_PT
-        ok_all &= ok
-        print(f"  {r['name']:<26}{r['actual_w']:>7.1f}\"{r['print_w']:>7.1f}\""
-              f"{src_body:>9.1f}{eff_body:>9.1f}{eff_leg:>8.1f}"
-              f"{floor_w:>9.1f}\"  {'yes' if ok else 'NO'}")
-    print(f"  {'-'*82}")
+        print(f"  {r['name']:<28}{r['w']:>8.2f}\"{r['h']:>8.2f}\""
+              f"{TARGET_PT:>9.1f}{LEGEND_PT:>8.1f}  "
+              f"{'yes' if ok_all else 'NO'}")
+    print(f"  {'-'*68}")
     print(f"  All figures clear the {MIN_PT:.0f}pt floor: {'YES' if ok_all else 'NO'}")
-    lo = min(r["print_w"] / r["actual_w"] * LEGEND_PT * r["k"] for r in _AUDIT)
-    hi = max(r["print_w"] / r["actual_w"] * TARGET_PT * r["k"] for r in _AUDIT)
-    print(f"  Body text lands at {hi:.1f}pt; smallest legend lands at {lo:.1f}pt.")
+    print(f"  Include each at its width above with \\includegraphics[width=...]")
+    print(f"  and NO height= / keepaspectratio, or the scale drops below 1:1.")
 
 
 if __name__ == "__main__":
@@ -677,11 +686,13 @@ if __name__ == "__main__":
     parser.add_argument("--outdir",         default="plots/v4_ppo")
     parser.add_argument("--seeds", type=int, nargs="+", default=[42, 43, 44, 45, 46])
     parser.add_argument("--print-width", type=float, default=TEXT_WIDTH,
-                        help=f"printed width (in) of full-width figures "
-                             f"(default {TEXT_WIDTH}in = AAAI \\textwidth)")
+                        help=f"width (in) full-width figures are drawn AND "
+                             f"printed at (default {TEXT_WIDTH}in = AAAI "
+                             f"\\textwidth)")
     parser.add_argument("--panel-print-width", type=float, default=COLUMN_WIDTH,
-                        help=f"printed width (in) of one panel of a composite "
-                             f"(default {COLUMN_WIDTH}in = AAAI \\columnwidth)")
+                        help=f"width (in) a single panel is drawn AND printed "
+                             f"at (default {COLUMN_WIDTH}in = AAAI "
+                             f"\\columnwidth)")
     parser.add_argument("--inline-legends", action="store_true",
                         help="keep a legend on every panel instead of emitting "
                              "standalone legend_*.pdf strips")
