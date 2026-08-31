@@ -127,7 +127,15 @@ BARS_PRINT_H   = 3.20   # fig 9: full-width bar chart
 # squeezed from 6.90in into 3.28in and its 10pt type lands at 4.8pt. Stacking
 # the panels instead gives each one the full column width at 1:1.
 COL_STRIP3_H = 3.60     # fig 5: 3 curve panels stacked, one shared x-axis
-COL_FIG10_H  = 3.90     # fig 10: bar panel + 2 curve panels, two x-axes
+COL_FIG10_H  = 2.75     # fig 10: bar panel + 2 curve panels, two x-axes
+# fig 10's top panel is a bar chart of four converged rates — it needs room for
+# the bars and one row of category labels, not the vertical span two overlapping
+# curves need. Two-thirds of a curve panel is enough for it, which leaves ~0.9in
+# for each of the two curve panels below — plenty, because those carry two series
+# rather than the four that made 1.4in too tight in figs 1-4. At 2.75in total the
+# figure prints SHORTER than the 3.90 canvas did squeezed into 0.8\columnwidth
+# (3.12in on the page), while going back to full column width and 1:1 8pt type.
+COL_FIG10_RATIOS = [0.8, 1.2, 1.2]
 COL_STRIP2_H = 2.80     # fig 6: 2 panels stacked
 COL_BARS_H   = 2.60     # fig 9: horizontal bars
 
@@ -203,7 +211,8 @@ def stacked():
     return LAYOUT == "column"
 
 
-def composite(name, nax, print_w, wide_h, col_h, width_ratios=None, sharex=True):
+def composite(name, nax, print_w, wide_h, col_h, width_ratios=None, sharex=True,
+              height_ratios=None, constrained=False):
     """
     Build one of the four composites that the paper typesets as a unit.
 
@@ -215,6 +224,12 @@ def composite(name, nax, print_w, wide_h, col_h, width_ratios=None, sharex=True)
     them is categorical (fig10's bar panel), or its four category positions get
     forced onto the 0..50000 episode scale.
 
+    height_ratios applies to the stacked layout only, for composites whose
+    panels do not all need the same vertical room (a bar chart does not).
+    constrained uses constrained_layout instead of a tight_layout call, which
+    packs the stacked panels a little tighter — worth it once the canvas is
+    short enough that the inter-panel gaps are a visible fraction of it.
+
     Both layouts are drawn 1:1, so nothing is resampled into the page.
     Returns (fig, axes).
     """
@@ -223,7 +238,10 @@ def composite(name, nax, print_w, wide_h, col_h, width_ratios=None, sharex=True)
     sty()
     _record(name, pw, ph)
     if stacked():
-        fig, axes = plt.subplots(nax, 1, figsize=(pw, ph), sharex=sharex)
+        fig, axes = plt.subplots(nax, 1, figsize=(pw, ph), sharex=sharex,
+                                 layout="constrained" if constrained else None,
+                                 gridspec_kw=(dict(height_ratios=height_ratios)
+                                              if height_ratios else None))
     else:
         fig, axes = plt.subplots(1, nax, figsize=(pw, ph),
                                  gridspec_kw=(dict(width_ratios=width_ratios)
@@ -573,7 +591,8 @@ def _draw_all(R, print_w, panel_w):
         # every panel already spans the column, so the ratios do not apply.
         fig, axes = composite("fig10_collusion", 3, print_w,
                               STRIP3_PRINT_H, COL_FIG10_H,
-                              width_ratios=[1.35, 1, 1], sharex=False)
+                              width_ratios=[1.35, 1, 1], sharex=False,
+                              height_ratios=COL_FIG10_RATIOS, constrained=True)
         n_last = max(1, R["DPF"]["truth"].shape[1] // 5)
         s = slice(-n_last, None)
         ed, cd = R["DPF"], R["AC"]
@@ -605,7 +624,10 @@ def _draw_all(R, print_w, panel_w):
             episode_axis_for(axes[2:], n_ep, shared=False)
         else:
             episode_axis_for(axes[1:], n_ep, shared=False)
-        fig.tight_layout()
+        # stacked fig10 is built with constrained_layout, which fits the content
+        # itself; calling tight_layout on top of it is a no-op with a warning
+        if not stacked():
+            fig.tight_layout()
         _save(fig, "fig10_collusion")
         n_saved += 1
 
