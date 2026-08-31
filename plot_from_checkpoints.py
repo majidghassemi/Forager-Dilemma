@@ -6,10 +6,12 @@ identical metric keys and identical checkpoint filenames. Only the directory
 differs:
 
     # Q-learning  -> plots/v3
-    python plot_from_checkpoints.py --checkpoint-dir checkpoints_qlearning --outdir plots/v3
+    python plot_from_checkpoints.py --checkpoint-dir checkpoints_qlearning \
+        --outdir plots/v3 --layout column
 
     # IPPO        -> plots/v4_final
-    python plot_from_checkpoints.py --checkpoint-dir checkpoints_ablation --outdir plots/v4_final
+    python plot_from_checkpoints.py --checkpoint-dir checkpoints_ablation \
+        --outdir plots/v4_final --layout column
 
 Typography
 ----------
@@ -31,12 +33,25 @@ shrinks a figure. Only the printed heights change (PANEL_PRINT_H and friends),
 because height is the axis along which overlapping curves separate, and the
 previous panels gave four curves just 1.4in of it.
 
-The four \textwidth figures (05, 06, 09, 10) go in as `figure*`, spanning both
-columns, and are drawn 1:1 — source width == print width, scale == 1. Nothing
-about them is resampled into the page, so properties matplotlib does not
-express in scaled units (hatch stroke width above all) come out at their
-intended size rather than at 47-78%% of it. Set ONE_TO_ONE_WIDE = False to go
-back to oversized sources.
+Figures 05, 06, 09 and 10 are composites, and --layout says which environment
+the paper puts them in:
+
+    --layout column   `figure`  -> 3.3125in, panels stacked one per row  (paper)
+    --layout wide     `figure*` -> 7.0in, panels side by side
+
+The paper uses plain `figure`, so `column` is what it needs. Building them wide
+and letting LaTeX squeeze 6.90in into a 3.28in column is a 0.48x scale that puts
+10pt type at 4.8pt, under the 7pt floor. Stacked, each panel gets the full
+column at 1:1.
+
+NOTE: the stacked figures are taller than the caps in the paper's
+\includegraphics. Any `height=...,keepaspectratio` on these four must be
+dropped, or height binds instead of width and shrinks them further than before.
+
+Either layout is drawn 1:1 — source width == print width, scale == 1 — so
+nothing is resampled into the page and properties matplotlib does not express
+in scaled units (hatch stroke width above all) come out at their intended size.
+Set ONE_TO_ONE_WIDE = False to go back to oversized sources.
 """
 
 import os, argparse
@@ -97,6 +112,17 @@ PANEL_PRINT_H  = 2.35   # figs 1-4, 7, 8: one column-wide panel
 STRIP3_PRINT_H = 3.30   # figs 5, 10: full-width 3-panel strip
 STRIP2_PRINT_H = 3.60   # fig 6: full-width 2-panel
 BARS_PRINT_H   = 3.20   # fig 9: full-width bar chart
+
+# --layout column: figs 5, 6, 9, 10 rebuilt to sit in ONE \columnwidth. The
+# paper puts them in `figure` (not `figure*`) environments, so a 1x3 strip is
+# squeezed from 6.90in into 3.28in and its 10pt type lands at 4.8pt. Stacking
+# the panels instead gives each one the full column width at 1:1.
+COL_STRIP3_H = 3.60     # fig 5: 3 curve panels stacked, one shared x-axis
+COL_FIG10_H  = 3.90     # fig 10: bar panel + 2 curve panels, two x-axes
+COL_STRIP2_H = 2.80     # fig 6: 2 panels stacked
+COL_BARS_H   = 2.60     # fig 9: horizontal bars
+
+LAYOUT = "wide"         # "wide" (figure*, 7.0in) | "column" (figure, 3.3125in)
 
 FILL_ALPHA = 0.10  # +/-1 sigma band; 0.15 turned overlapping bands into fog
 
@@ -169,6 +195,60 @@ def st(c):
 def src_h(source_w, print_w, print_h):
     """Source-figure height that lands at `print_h` inches once scaled to `print_w`."""
     return print_h * (source_w / float(print_w))
+
+
+def stacked():
+    """True when the \\textwidth composites are being rebuilt for one column."""
+    return LAYOUT == "column"
+
+
+def composite(name, nax, print_w, wide_h, col_h, width_ratios=None, sharex=True):
+    """
+    Build one of the four composites that the paper typesets as a unit.
+
+    wide   -> 1 x nax across \\textwidth
+    column -> nax x 1 stacked inside \\columnwidth
+
+    Stacked panels share an x-axis so only the bottom one pays for tick labels
+    — but only when every panel IS the same axis. Pass sharex=False when one of
+    them is categorical (fig10's bar panel), or its four category positions get
+    forced onto the 0..50000 episode scale.
+
+    Both layouts are drawn 1:1, so nothing is resampled into the page.
+    Returns (fig, axes).
+    """
+    pw = COLUMN_WIDTH if stacked() else print_w
+    sty(pw, pw)
+    _record(name, pw, pw)
+    if stacked():
+        fig, axes = plt.subplots(nax, 1, figsize=(pw, col_h), sharex=sharex)
+    else:
+        fig, axes = plt.subplots(1, nax, figsize=(pw, wide_h),
+                                 gridspec_kw=(dict(width_ratios=width_ratios)
+                                              if width_ratios else None))
+    return fig, np.atleast_1d(axes)
+
+
+def panel_label(ax, text):
+    """
+    Name a panel's metric. Stacked panels are ~0.9in tall and a rotated
+    "Verification Rate" is 1.05in long at 10pt, so it would overrun the axes;
+    a left-aligned title above the panel costs less height than it wastes.
+    """
+    if stacked():
+        ax.set_title(text, loc="left", pad=2.0)
+    else:
+        ax.set_ylabel(text)
+
+
+def episode_axis_for(axes, n_ep, shared=True):
+    """
+    x-axis furniture. Side by side every panel gets it. Stacked, only the last
+    one does — unless the panels are not actually sharing an axis, in which case
+    each still needs its own labels.
+    """
+    for a in (axes[-1:] if (stacked() and shared) else axes):
+        _episode_axis(a, n_ep)
 
 
 def _record(name, source_w, print_w):
@@ -249,8 +329,11 @@ def _fit_y(ax):
     ax.autoscale_view()
     # fitting the range can leave only two ticks; keep enough to read values off
     # (6 rather than 5 — the taller panels have room for the extra gridline, and
-    # a denser ruler is what lets a reader resolve two curves that run close)
-    ax.yaxis.set_major_locator(MaxNLocator(nbins=6, steps=[1, 2, 2.5, 5, 10]))
+    # a denser ruler is what lets a reader resolve two curves that run close).
+    # Stacked panels are a third of that height and 6 labels overlap into an
+    # unreadable stack, so they get 4.
+    ax.yaxis.set_major_locator(
+        MaxNLocator(nbins=4 if stacked() else 6, steps=[1, 2, 2.5, 5, 10]))
     lo, hi = ax.get_ylim()
     if lo < 0:
         # these metrics are all non-negative: keep a sliver below zero so a
@@ -371,11 +454,9 @@ def _draw_all(R, print_w, panel_w):
     _curve(R, "mine",   "Mine Rate",   "fig04_moral_drift",   panel_w, n_ep)
     n_saved += 4
 
-    # ── Fig 5: emergent social dynamics, full-width 3-panel strip ─────────
-    source_w = print_w if ONE_TO_ONE_WIDE else 15.0
-    sty(source_w, print_w); _record("fig05_social", source_w, print_w)
-    fig, axes = plt.subplots(1, 3,
-                             figsize=(source_w, src_h(source_w, print_w, STRIP3_PRINT_H)))
+    # ── Fig 5: emergent social dynamics, 3 panels ─────────────────────────
+    fig, axes = composite("fig05_social", 3, print_w,
+                          STRIP3_PRINT_H, COL_STRIP3_H)
     for c in ["DPF", "DERL"]:
         if c not in R:
             continue
@@ -384,29 +465,28 @@ def _draw_all(R, print_w, panel_w):
         plot_with_fill(axes[2], R[c]["mean_rep"], label=LB[c], color=CL[c], **st(c))
     for a, yl in zip(axes, ["Punishment Rate", "Verification Rate",
                             "Mean Reputation"]):
-        a.set_ylabel(yl)
-        _episode_axis(a, n_ep)
+        panel_label(a, yl)
         _fit_y(a)
         _legend(a, ncol=2)
+    episode_axis_for(axes, n_ep)
     fig.tight_layout()
     _save(fig, "fig05_social")
     n_saved += 1
 
-    # ── Fig 6: cooperation + oracle accuracy, full-width 2-panel ──────────
-    source_w = print_w if ONE_TO_ONE_WIDE else 11.0
-    sty(source_w, print_w); _record("fig06_coop_oracle", source_w, print_w)
-    fig, (a1, a2) = plt.subplots(1, 2,
-                                 figsize=(source_w, src_h(source_w, print_w, STRIP2_PRINT_H)))
+    # ── Fig 6: cooperation + oracle accuracy, 2 panels ────────────────────
+    fig, axes = composite("fig06_coop_oracle", 2, print_w,
+                          STRIP2_PRINT_H, COL_STRIP2_H)
+    a1, a2 = axes
     for c in MC:
         if c not in R:
             continue
         plot_with_fill(a1, R[c]["coop"],       label=LB[c], color=CL[c], **st(c))
         plot_with_fill(a2, R[c]["oracle_acc"], label=LB[c], color=CL[c], **st(c))
-    for a, yl in zip((a1, a2), ["Cooperation Rate", "Oracle Accuracy"]):
-        a.set_ylabel(yl)
-        _episode_axis(a, n_ep)
+    for a, yl in zip(axes, ["Cooperation Rate", "Oracle Accuracy"]):
+        panel_label(a, yl)
         _fit_y(a)
         _legend(a, ncol=2)
+    episode_axis_for(axes, n_ep)
     fig.tight_layout()
     _save(fig, "fig06_coop_oracle")
     n_saved += 1
@@ -442,22 +522,34 @@ def _draw_all(R, print_w, panel_w):
         mets = ["truth", "gather", "lie", "mine", "punish"]
         mls  = [r"Truth $\uparrow$", r"Gather $\uparrow$",
                 r"Lie $\downarrow$", r"Mine $\downarrow$", "Punish"]
-        source_w = print_w if ONE_TO_ONE_WIDE else 9.0
-        sty(source_w, print_w); _record("fig09_ablation_punish", source_w, print_w)
-        fig, ax = plt.subplots(figsize=(source_w, src_h(source_w, print_w, BARS_PRINT_H)))
+        pw = COLUMN_WIDTH if stacked() else print_w
+        sty(pw, pw); _record("fig09_ablation_punish", pw, pw)
+        fig, ax = plt.subplots(figsize=(pw, COL_BARS_H if stacked()
+                                        else BARS_PRINT_H))
         x  = np.arange(len(mets))
         bw = 0.18
         cm = plt.cm.viridis
         n_last = max(1, abl[keys[0]]["truth"].shape[1] // 5)
         for i, k in enumerate(keys):
             vals = [np.mean(abl[k][m][:, -n_last:]) for m in mets]
-            ax.bar(x + (i - len(keys) / 2 + 0.5) * bw, vals, bw,
-                   label=f"pun_rew={k}",
-                   color=cm(i / max(len(keys) - 1, 1)),
-                   hatch=HATCH[i % len(HATCH)],
-                   edgecolor="white", linewidth=0.6 * _K)
-        ax.set_xticks(x); ax.set_xticklabels(mls)
-        ax.set(ylabel=f"Rate (last {n_last} ep)")
+            off  = (i - len(keys) / 2 + 0.5) * bw
+            args = dict(label=f"pun_rew={k}",
+                        color=cm(i / max(len(keys) - 1, 1)),
+                        hatch=HATCH[i % len(HATCH)],
+                        edgecolor="white", linewidth=0.6 * _K)
+            if stacked():
+                # 20 vertical bars inside 3.31in leaves each 0.11in wide and the
+                # five category labels overlapping; horizontally the column's
+                # scarce axis is the one the labels do not compete for
+                ax.barh(x[::-1] - off, vals, bw, **args)
+            else:
+                ax.bar(x + off, vals, bw, **args)
+        if stacked():
+            ax.set_yticks(x[::-1]); ax.set_yticklabels(mls)
+            ax.set(xlabel=f"Rate (last {n_last} ep)")
+        else:
+            ax.set_xticks(x); ax.set_xticklabels(mls)
+            ax.set(ylabel=f"Rate (last {n_last} ep)")
         _legend(ax, ncol=4)
         fig.tight_layout()
         _save(fig, "fig09_ablation_punish")
@@ -468,13 +560,12 @@ def _draw_all(R, print_w, panel_w):
 
     # ── Fig 10: adversarial coalition robustness ──────────────────────────
     if "DPF" in R and "AC" in R:
-        source_w = print_w if ONE_TO_ONE_WIDE else 14.0
-        sty(source_w, print_w); _record("fig10_collusion", source_w, print_w)
-        # Panel A carries four category labels, so it needs more width than the
-        # two curve panels or "Gather"/"Mine" collide at print size.
-        fig, axes = plt.subplots(1, 3,
-                                 figsize=(source_w, src_h(source_w, print_w, STRIP3_PRINT_H)),
-                                 gridspec_kw=dict(width_ratios=[1.35, 1, 1]))
+        # Side by side, panel A carries four category labels and needs more
+        # width than the two curve panels or "Gather"/"Mine" collide. Stacked,
+        # every panel already spans the column, so the ratios do not apply.
+        fig, axes = composite("fig10_collusion", 3, print_w,
+                              STRIP3_PRINT_H, COL_FIG10_H,
+                              width_ratios=[1.35, 1, 1], sharex=False)
         n_last = max(1, R["DPF"]["truth"].shape[1] // 5)
         s = slice(-n_last, None)
         ed, cd = R["DPF"], R["AC"]
@@ -488,17 +579,24 @@ def _draw_all(R, print_w, panel_w):
         axes[0].bar(xp + 0.17, cv, 0.32, label="AC", color=CL["AC"],
                     hatch="///", edgecolor="white", linewidth=0.6 * _K)
         axes[0].set_xticks(xp); axes[0].set_xticklabels(ls)
-        axes[0].set(ylabel="Rate"); _legend(axes[0], ncol=2)
+        panel_label(axes[0], "Rate"); _legend(axes[0], ncol=2)
         plot_with_fill(axes[1], ed["coop"], "DPF", CL["DPF"], **st("DPF"))
         plot_with_fill(axes[1], cd["coop"], "AC",  CL["AC"],  **st("AC"))
-        axes[1].set_ylabel("Cooperation Rate")
-        _episode_axis(axes[1], n_ep); _fit_y(axes[1])
-        _legend(axes[1], ncol=2)
+        panel_label(axes[1], "Cooperation Rate")
+        _fit_y(axes[1]); _legend(axes[1], ncol=2)
         plot_with_fill(axes[2], ed["oracle_acc"], "DPF", CL["DPF"], **st("DPF"))
         plot_with_fill(axes[2], cd["oracle_acc"], "AC",  CL["AC"],  **st("AC"))
-        axes[2].set_ylabel("Oracle Accuracy")
-        _episode_axis(axes[2], n_ep); _fit_y(axes[2])
-        _legend(axes[2], ncol=2)
+        panel_label(axes[2], "Oracle Accuracy")
+        _fit_y(axes[2]); _legend(axes[2], ncol=2)
+        # Panel A is categorical, so the figure cannot share x globally. The two
+        # curve panels are both episode axes though, so pair them by hand: one
+        # set of tick labels and one "Episode" label instead of two.
+        if stacked():
+            axes[1].sharex(axes[2])
+            axes[1].tick_params(labelbottom=False)
+            episode_axis_for(axes[2:], n_ep, shared=False)
+        else:
+            episode_axis_for(axes[1:], n_ep, shared=False)
         fig.tight_layout()
         _save(fig, "fig10_collusion")
         n_saved += 1
@@ -587,11 +685,17 @@ if __name__ == "__main__":
     parser.add_argument("--inline-legends", action="store_true",
                         help="keep a legend on every panel instead of emitting "
                              "standalone legend_*.pdf strips")
+    parser.add_argument("--layout", choices=["wide", "column"], default="wide",
+                        help="geometry for figs 5, 6, 9, 10: 'wide' for a "
+                             "figure* spanning \\textwidth, 'column' to rebuild "
+                             "them stacked inside one \\columnwidth (what a "
+                             "plain `figure` environment gives them)")
     parser.add_argument("--audit", action="store_true",
                         help="report effective printed point sizes")
     args = parser.parse_args()
 
     PANEL_LEGENDS = args.inline_legends
+    LAYOUT = args.layout
 
     print(f"Loading checkpoints from {args.checkpoint_dir} ...")
     R = load_checkpoints(args.checkpoint_dir, args.seeds)
