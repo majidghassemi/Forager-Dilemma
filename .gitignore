@@ -50,3 +50,6 @@ yarn-error.log
 *.tmp
 *.temp
 *.pdf
+# ...except the figures themselves, which are now PDF-only and are the
+# camera-ready assets the paper includes
+!plots/**/*.pdf
